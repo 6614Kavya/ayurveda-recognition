@@ -44,11 +44,11 @@ VIEWS = ["top", "bottom"]
 IMG_EXTS = ["*.jpg", "*.JPG", "*.png", "*.PNG", "*.jpeg", "*.JPEG"]
 
 # ── Output folder layout ──────────────────────────────────────────────────────
-# processed/<species>/top/enhanced/    ← CNN input
-# processed/<species>/top/masked_raw/  ← Health input
-# processed/<species>/top/summaries/   ← QC grid images
-# features/                            ← CSVs
-# diagnostics/                         ← per-image JSON + failure log
+# ../dataset/processed/<species>/top/enhanced/    ← CNN input
+# ../dataset/processed/<species>/top/masked_raw/  ← Health input
+# ../dataset/processed/<species>/top/summaries/   ← QC grid images
+# ../dataset/features/                            ← CSVs
+# ../dataset/diagnostics/                         ← per-image JSON + failure log
 
 # ── Augmentation ──────────────────────────────────────────────────────────────
 AUG_PER_IMAGE = 6         # Augmented variants per raw image (offline)

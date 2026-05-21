@@ -1,11 +1,31 @@
 """
-VedaVision — Texture Features
-==============================
+VedaVision — Texture Features  (shadow-robust revision)
+========================================================
 GLCM + LBP texture descriptors extracted from the ENHANCED (sharpened) image.
-Enhancement improves vein contrast, making texture boundaries crisper for GLCM.
 
-GLCM: 2 distances × 4 angles → mean+std per property (rotation-invariant)
-LBP : P=24, R=3 → 26 uniform pattern bins, normalised histogram
+Shadow-robustness changes vs previous version
+---------------------------------------------
+GLCM:
+  OLD — bounding-box crop only; background/shadow pixels set to 0
+        → zero creates a massive artificial contrast edge in the GLCM
+  NEW — excluded pixels (outside mask OR suspiciously dark) filled with
+        the MEDIAN foreground value instead of zero.
+        Median fill is co-occurrence-neutral: a pixel surrounded by
+        median-valued neighbours contributes nothing unusual to any GLCM
+        property.  Shadow pixels that sneak past the mask are treated the
+        same way: they are clamped toward the median before GLCM runs.
+
+  ADDED: confident_mask — pixels with V < 40 inside the foreground are
+         flagged as probable shadow contamination and median-filled rather
+         than included in the GLCM.  This threshold is conservative
+         (V < 40 means very dark, not just shaded).
+
+LBP:
+  UNCHANGED — LBP compares each pixel to its neighbours RELATIVELY.
+  A shadow pixel surrounded by other shadow pixels produces the same
+  LBP code as a bright pixel in a bright region.  LBP is inherently
+  illumination-invariant and needs no shadow-specific modification.
+  Histogram is still computed on foreground pixels only (px_mask gate).
 """
 
 import cv2
@@ -13,6 +33,16 @@ import numpy as np
 from skimage.feature import local_binary_pattern, graycomatrix, graycoprops
 from preprocessing.config import LBP_RADIUS, LBP_POINTS, GLCM_DIST, GLCM_ANGLES
 
+# ---------------------------------------------------------------------------
+# Shadow-confidence threshold
+# ---------------------------------------------------------------------------
+_SHADOW_V_THRESH = 40   # HSV Value below this inside the mask → probable shadow
+                        # Conservative: real deep-green leaves have V ≈ 60-100
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def extract_texture_features(img_sharp_bgr: np.ndarray,
                               leaf_mask: np.ndarray) -> dict:
@@ -24,41 +54,76 @@ def extract_texture_features(img_sharp_bgr: np.ndarray,
 
     Returns
     -------
-    dict — 8 GLCM stats (4 props × mean+std) + (LBP_POINTS+2) histogram bins
-           + lbp_mean, lbp_std = 36 dims total
+    dict — 8 GLCM stats (4 props × mean+std, rotation-invariant)
+           + (LBP_POINTS+2) histogram bins + lbp_mean + lbp_std
+           = same dimensionality as previous version
+
+    Shadow robustness
+    -----------------
+    Excluded pixels (background OR dark shadow) are filled with the median
+    foreground grey value BEFORE GLCM.  This neutralises artificial contrast
+    edges that zero-fill would create at the shadow/leaf boundary.
+    LBP is illumination-invariant by design — no change needed.
     """
     gray    = cv2.cvtColor(img_sharp_bgr, cv2.COLOR_BGR2GRAY)
     px_mask = leaf_mask > 0
     if px_mask.sum() < 50:
         return {}
 
-    feats = {}
+    feats: dict = {}
 
-    # ── GLCM ──────────────────────────────────────────────────────────────────
-    # Crop to leaf bounding box to reduce background zeros in co-occurrence matrix
-    ys, xs  = np.where(px_mask)
-    y1, y2  = ys.min(), ys.max() + 1
-    x1, x2  = xs.min(), xs.max() + 1
-    # Quantise to 64 levels (256→64); each bin spans 4 intensity units.
-    # Sufficient to distinguish dark veins from bright lamina while keeping
-    # the GLCM matrix computationally tractable.
-    gray_q = (gray[y1:y2, x1:x2] // 4).astype(np.uint8)
+    # ── Confident foreground mask ─────────────────────────────────────────
+    # Mark very dark foreground pixels as shadow-contaminated.
+    hsv_v    = cv2.cvtColor(img_sharp_bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
+    shadow   = (hsv_v < _SHADOW_V_THRESH) & px_mask   # dark pixels inside mask
+    confident_mask = px_mask & ~shadow                  # boolean: true foreground
+
+    # Fall back to full foreground mask if confident region is too small
+    if confident_mask.sum() < 50:
+        confident_mask = px_mask
+
+    # ── GLCM — bounding box crop + median fill ────────────────────────────
+    ys, xs = np.where(confident_mask)
+    y1, y2 = int(ys.min()), int(ys.max()) + 1
+    x1, x2 = int(xs.min()), int(xs.max()) + 1
+
+    gray_crop   = gray[y1:y2, x1:x2].copy()
+    conf_crop   = confident_mask[y1:y2, x1:x2]
+
+    # Median of confident foreground pixels — our neutral fill value
+    median_val  = int(np.median(gray_crop[conf_crop]))
+
+    # Fill pixels that are NOT confident foreground with median value.
+    # This covers: (a) white/shadow background outside leaf,
+    #              (b) dark shadow pixels inside leaf boundary.
+    # Using median instead of zero prevents artificial contrast spikes
+    # in the GLCM co-occurrence matrix.
+    gray_crop[~conf_crop] = median_val
+
+    # Quantise to 64 levels — sufficient to distinguish dark veins from lamina
+    gray_q = (gray_crop // 4).astype(np.uint8)
 
     glcm = graycomatrix(
-        gray_q, distances=GLCM_DIST, angles=GLCM_ANGLES,
-        levels=64, symmetric=True, normed=True
+        gray_q,
+        distances=GLCM_DIST,
+        angles=GLCM_ANGLES,
+        levels=64,
+        symmetric=True,
+        normed=True,
     )
     for prop in ["contrast", "homogeneity", "energy", "correlation"]:
-        vals = graycoprops(glcm, prop)   # shape: (n_dist, n_angles)
+        vals = graycoprops(glcm, prop)   # (n_dist, n_angles)
         feats[f"glcm_{prop}_mean"] = float(vals.mean())
         feats[f"glcm_{prop}_std"]  = float(vals.std())
 
-    # ── LBP ───────────────────────────────────────────────────────────────────
+    # ── LBP — inherently shadow-robust, no modification needed ───────────
+    # LBP encodes relative brightness patterns; shadow is a global darkening
+    # so local patterns (vein edges, cell boundaries) are preserved.
     lbp      = local_binary_pattern(gray, LBP_POINTS, LBP_RADIUS, method="uniform")
     n_bins   = LBP_POINTS + 2
-    lbp_vals = lbp[px_mask]
+    lbp_vals = lbp[px_mask]                  # foreground pixels only
     lbp_hist, _ = np.histogram(lbp_vals, bins=n_bins, range=(0, n_bins))
-    lbp_hist = lbp_hist / (lbp_hist.sum() + 1e-6)
+    lbp_hist     = lbp_hist / (lbp_hist.sum() + 1e-6)
     for bi, bv in enumerate(lbp_hist):
         feats[f"lbp_{bi:02d}"] = float(bv)
     feats["lbp_mean"] = float(lbp_vals.mean()) if len(lbp_vals) else 0.0
