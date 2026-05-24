@@ -25,6 +25,17 @@ from feature_extraction.species_id.whole_leaf import extract_whole_leaf_features
 from preprocessing.config import TARGET_LONG
 
 
+def _namespace_features(prefix: str, features: dict) -> dict:
+    """Prefix feature keys once, preserving keys that are already namespaced."""
+    namespaced = {}
+    for key, value in features.items():
+        if key.startswith(f"{prefix}_"):
+            namespaced[key] = value
+        else:
+            namespaced[f"{prefix}_{key}"] = value
+    return namespaced
+
+
 def run_pipeline(img_path: str | Path,
                  species: str,
                  view_side: str
@@ -92,17 +103,21 @@ def run_pipeline(img_path: str | Path,
 
     # ── Assemble flat feature dict ────────────────────────────────────────────
     feats = {}
-    feats.update({f"shape_{k}":   v for k, v in shape_f.items()})
-    feats.update({f"colour_{k}":  v for k, v in colour_f.items()})
-    feats.update({f"texture_{k}": v for k, v in texture_f.items()})
-    feats.update({f"vein_{k}":    v for k, v in vein_f.items()})
-    feats.update({f"whole_{k}":   v for k, v in whole_f.items()})
+    feats.update(_namespace_features("shape", shape_f))
+    feats.update(_namespace_features("colour", colour_f))
+    feats.update(_namespace_features("texture", texture_f))
+    feats.update(_namespace_features("vein", vein_f))
+    feats.update(_namespace_features("whole", whole_f))
 
     # Metadata columns (not features — excluded from classifier input)
-    feats["species"]     = species
-    feats["view_side"]   = view_side
-    feats["image_path"]  = str(img_path)
-    feats["mask_choice"] = mask_choice
+    # vein_coverage_pct and vein_roi_scale are already in feats via
+    # the f"vein_{k}" loop above (they come from extract_vein_features).
+    # Do NOT re-assign them here — that would overwrite with mask_diag
+    # keys that do not exist, causing a KeyError at runtime.
+    feats["species"]      = species
+    feats["view_side"]    = view_side
+    feats["image_path"]   = str(img_path)
+    feats["mask_choice"]  = mask_choice
     feats["coverage_pct"] = mask_diag["coverage_pct"]
 
     return feats, info
@@ -124,7 +139,8 @@ if __name__ == "__main__":
         print(f"[FAIL] {info['qc_reason']}")
     else:
         n = sum(1 for k in feats if k not in ("species", "view_side", "image_path",
-                                               "mask_choice", "coverage_pct"))
+                                               "mask_choice", "coverage_pct",
+                                               "vein_coverage_pct", "vein_roi_scale"))
         print(f"[OK] {n} features extracted")
         print(f"  mask_choice  : {info['mask_choice']}")
         print(f"  coverage_pct : {info['mask_diag']['coverage_pct']:.1f}%")

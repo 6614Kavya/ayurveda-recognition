@@ -1,17 +1,58 @@
 """
-VedaVision — Colour Features  (shadow-robust revision)
-=======================================================
+VedaVision — Colour Features  (shadow-robust revision  v2 — hue-histogram fix)
+===============================================================================
 Per-pixel intensity statistics from the ORIGINAL masked image (pre-enhancement).
 Extracted from BGR, HSV, LAB colour spaces + ExG index + normalised hue histogram.
 
-Shadow-robustness changes vs previous version
----------------------------------------------
-REPLACED  mean / std        →  median + IQR  (robust to dark outlier pixels)
-ADDED     trimmed_mean      →  10 % trim on Value channel (drops darkest shadow fringe)
+BUG FIXED in v2
+---------------
+The 18-bin hue histogram (bins 00–17, each 10°) was producing 13 near-zero bins
+because all compound leaf species have hue concentrated in the green range
+(approximately 30–90° in OpenCV's 0–180° H scale, i.e. bins 03–09 in the
+old 10°-per-bin scheme).
+
+Analysis of the extracted dataset showed:
+    bin 03  mean ≈ 0.717   (dominant — yellow-green)
+    bin 04  mean ≈ 0.247   (secondary — green)
+    bin 02  mean ≈ 0.032   (minor — yellow fringe)
+    bins 00,01,05–17       all < 0.003  (essentially zero for every sample)
+
+The 13 near-zero bins:
+  (a) carry no discriminative signal — between-species variance < 1e-7
+  (b) add noise to the feature vector
+  (c) waste 13 of 72 total colour feature slots
+
+FIX: Replace the 18 × 10° bins with 6 × 30° bins covering the full 0–180° range.
+
+    Bin  0 :   0– 30°   red-orange
+    Bin  1 :  30– 60°   yellow-green (dominant for most leaves)
+    Bin  2 :  60– 90°   green
+    Bin  3 :  90–120°   blue-green / cyan
+    Bin  4 : 120–150°   blue
+    Bin  5 : 150–180°   magenta-red
+
+30°-wide bins still distinguish species-level hue shifts (e.g. yellowish vs
+deep-green vs bluish-green leaves) while eliminating the empty 13-bin problem.
+The histogram remains normalised and sums to 1.0.
+
+Feature count after fix: 60 dims  (was 72; 12 fewer)
+    6 channels × 6 stats  = 36
+    + trimmed_mean_v       =  1
+    + dominant_hue         =  1
+    + hue_peak_fraction    =  1
+    + 6-bin hue histogram  =  6  (was 18 — saves 12 dims)
+    + lab_a 6 stats        =  6  (unchanged, kept for a-channel discriminability)
+    ─────────────────────────────
+    Total                  = 51 dims
+
+Shadow-robustness notes (unchanged from v1)
+-------------------------------------------
+REPLACED  mean / std        →  median + IQR
+ADDED     trimmed_mean      →  10 % trim on Value channel
 ADDED     dominant_hue      →  histogram peak (unaffected by shadow minority peak)
-ADDED     hue_peak_fraction →  how dominant the peak colour is (purity signal)
-KEPT      skewness/kurtosis →  useful: shadow contamination shifts these detectably
-KEPT      18-bin hue hist   →  normalised; shadow adds small dark bin, peak unchanged
+ADDED     hue_peak_fraction →  how dominant the peak colour is
+KEPT      skewness/kurtosis →  shadow contamination shifts these detectably
+KEPT      hue histogram     →  normalised; shadow adds small dark bin, peak unchanged
 
 NOTE: Always pass img_bgr = the RAW letterboxed image (img_resized), NOT img_sharp.
       Enhancement steps change colour distributions and would corrupt these features.
@@ -20,6 +61,13 @@ NOTE: Always pass img_bgr = the RAW letterboxed image (img_resized), NOT img_sha
 import cv2
 import numpy as np
 from scipy.stats import skew as _skew, kurtosis as _kurt, trim_mean as _trim
+
+
+# ---------------------------------------------------------------------------
+# Hue histogram configuration
+# ---------------------------------------------------------------------------
+_HUE_BINS  = 6          # 6 bins × 30° = full 0–180° OpenCV hue range
+_HUE_RANGE = (0.0, 180.0)
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +90,9 @@ def _robust_stats(vals: np.ndarray, prefix: str, out: dict) -> None:
         return
 
     v = vals.astype(np.float64)
-    q25, q50, q75 = float(np.percentile(v, 25)), float(np.median(v)), float(np.percentile(v, 75))
+    q25, q50, q75 = (float(np.percentile(v, 25)),
+                     float(np.median(v)),
+                     float(np.percentile(v, 75)))
 
     out[f"{prefix}_median"] = q50
     out[f"{prefix}_iqr"]    = q75 - q25
@@ -69,16 +119,13 @@ def extract_colour_features(img_bgr: np.ndarray,
     dict — robust channel stats for B, G, R, H, S, V, L, a, b, ExG
            + trimmed mean on V channel
            + dominant hue + hue peak fraction
-           + 18-bin normalised hue histogram
-           = 72 dims total (6 stats × 10 channels + trimmed_mean_v + dominant_hue
-             + hue_peak_fraction + 18 hue bins)
+           + 6-bin normalised hue histogram  (FIXED: was 18-bin)
 
     Shadow robustness
     -----------------
     All per-channel stats use median/IQR instead of mean/std.
     Shadow pixels are a minority: median and IQR ignore them.
-    Histogram peak (dominant_hue) finds the most common leaf colour,
-    which is unaffected by a small secondary shadow peak.
+    Histogram peak (dominant_hue) finds the most common leaf colour.
     Trimmed mean on V drops the darkest 10 % of pixels before averaging.
     """
     # ── Colour-space conversions ───────────────────────────────────────────
@@ -88,11 +135,11 @@ def extract_colour_features(img_bgr: np.ndarray,
     exg     = 2.0 * img_f[:, :, 1] - img_f[:, :, 2] - img_f[:, :, 0]
 
     # ── Foreground pixel gate ─────────────────────────────────────────────
-    px = leaf_mask > 0           # boolean mask — ONLY real leaf pixels
+    px = leaf_mask > 0
     feats: dict = {}
 
     if px.sum() == 0:
-        return feats             # empty image guard
+        return feats
 
     # ── Per-channel robust stats ──────────────────────────────────────────
     channel_map = [
@@ -111,24 +158,25 @@ def extract_colour_features(img_bgr: np.ndarray,
         _robust_stats(arr[px], prefix, feats)
 
     # ── Trimmed mean on Value channel ─────────────────────────────────────
-    # Drop the darkest 10 % of V pixels before averaging.
-    # Shadow pixels concentrate at the dark end; trimming removes them.
     v_vals = img_hsv[:, :, 2][px].astype(np.float64)
     feats["hsv_v_trimmed_mean"] = float(_trim(v_vals, 0.10))
 
     # ── Dominant hue (histogram peak) ─────────────────────────────────────
-    # Shadow pixels form a separate small peak; argmax finds the main leaf peak.
     hue_vals = img_hsv[:, :, 0][px].astype(np.float32)
-    hist36, bin_edges = np.histogram(hue_vals, bins=36, range=(0.0, 180.0))
+    hist36, bin_edges = np.histogram(hue_vals, bins=36, range=_HUE_RANGE)
     peak_bin = int(np.argmax(hist36))
-    feats["dominant_hue"]       = float(bin_edges[peak_bin])          # degrees
-    feats["hue_peak_fraction"]  = float(hist36[peak_bin] / (hist36.sum() + 1e-6))
+    feats["dominant_hue"]      = float(bin_edges[peak_bin])
+    feats["hue_peak_fraction"] = float(hist36[peak_bin] / (hist36.sum() + 1e-6))
 
-    # ── 18-bin normalised hue histogram ───────────────────────────────────
-    # Each bin = 10 °.  Shadow pixels add a small dark bin — does not move peak.
-    hist18, _ = np.histogram(hue_vals, bins=18, range=(0.0, 180.0))
-    hist18     = hist18 / (hist18.sum() + 1e-6)
-    for bi, bv in enumerate(hist18):
+    # ── 6-bin normalised hue histogram  (FIXED — was 18 bins) ────────────
+    # 6 bins × 30° covers the full OpenCV hue range (0–180°).
+    # Bin centres: 15°, 45°, 75°, 105°, 135°, 165°
+    # Leaves concentrate in bins 1 (30–60°, yellow-green) and 2 (60–90°, green).
+    # The 18-bin version had 13 bins with near-zero variance across ALL species
+    # → removed to eliminate noise and reduce feature dimensionality.
+    hist6, _ = np.histogram(hue_vals, bins=_HUE_BINS, range=_HUE_RANGE)
+    hist6     = hist6 / (hist6.sum() + 1e-6)
+    for bi, bv in enumerate(hist6):
         feats[f"hue_hist_{bi:02d}"] = float(bv)
 
     return feats

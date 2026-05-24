@@ -2,21 +2,42 @@
 VedaVision — Batch Processor
 ==============================
 Processes the full dataset folder hierarchy and produces:
-  • features/vedavision_features.csv         — all successful rows
-  • diagnostics/failures.csv                  — all QC-failed / exception rows
-  • diagnostics/failures/<species>/<view>/    — copies of failed images
-  • diagnostics/per_image/                    — per-image JSON diagnostics
-  • diagnostics/report.json                   — full batch summary
-  • features/checkpoint_*.csv                 — partial CSVs every CHECKPOINT_EVERY images
+
+  TRAIN mode  (--mode train):
+  • features/vedavision_features_train.csv        — all successful train rows
+  • features/vedavision_features_train_clf.csv    — features-only (no metadata), for classifier
+  • features/checkpoint_*.csv                     — partial CSVs every CHECKPOINT_EVERY images
+
+  TEST mode   (--mode test):
+  • features/vedavision_features_test.csv         — all successful test rows
+  • features/vedavision_features_test_clf.csv     — features-only (no metadata), for evaluation
+
+  Both modes:
+  • diagnostics/failures.csv                      — QC-failed / exception rows
+  • diagnostics/failures/<species>/<view>/        — copies of failed images
+  • diagnostics/per_image/                        — per-image JSON diagnostics
+  • diagnostics/report.json                       — full batch summary
+
+Image naming convention (REQUIRED):
+    train images → filename starts with  "train_"   e.g. train_001.jpg
+    test  images → filename starts with  "test_"    e.g. test_001.jpg
+
+    Same leaf ID (e.g. test_003) must appear in both top/ and bottom/ for that species.
+    This enforces leaf-level train/test separation (no pseudo-replication).
 
 Dataset folder structure expected:
     dataset/raw/
         <species>/
-            top/     *.jpg *.png
-            bottom/  *.jpg *.png
+            top/
+                train_001.jpg ... train_030.jpg
+                test_001.jpg  ... test_005.jpg
+            bottom/
+                train_001.jpg ... train_030.jpg
+                test_001.jpg  ... test_005.jpg
 
 Run:
-    python -m preprocessing.batch_processor --data dataset/raw --out processed
+    python -m preprocessing.batch_processor --data dataset/raw --out processed --mode train
+    python -m preprocessing.batch_processor --data dataset/raw --out processed --mode test
 """
 
 import cv2
@@ -41,10 +62,33 @@ from preprocessing.config import (
 
 # ── Folder helpers ────────────────────────────────────────────────────────────
 
-def _collect_images(data_root: Path) -> list[tuple[Path, str, str]]:
+def _is_test_image(img_path: Path) -> bool:
     """
-    Walk dataset/raw/<species>/<view>/ and return list of (img_path, species, view).
+    Test images are identified by a 'test_' prefix in their filename stem.
+    e.g.  test_001.jpg  → True
+          PXL_20260508_075950959.jpg → False
+
+    Only the 5 test images per species/view need renaming to test_001..test_005.
+    All other camera-named images are automatically treated as train.
     """
+    return img_path.stem.lower().startswith("test_")
+
+
+def _collect_images(data_root: Path,
+                    mode: str = "train") -> list[tuple[Path, str, str]]:
+    """
+    Walk dataset/raw/<species>/<view>/ and return list of (img_path, species, view)
+    filtered by mode.
+
+    mode='train' → camera-named images (PXL_*, IMG_*, anything NOT starting with 'test_')
+    mode='test'  → images whose filename starts with 'test_' (test_001..test_005)
+
+    Only your 5 test images per species/view need renaming. Train images keep
+    their original camera names (PXL_20260508_075950959.jpg etc.) unchanged.
+    """
+    if mode not in ("train", "test"):
+        raise ValueError(f"mode must be 'train' or 'test', got '{mode}'")
+
     tasks = []
     for sp_dir in sorted(data_root.iterdir()):
         if not sp_dir.is_dir():
@@ -57,8 +101,13 @@ def _collect_images(data_root: Path) -> list[tuple[Path, str, str]]:
             for ext in IMG_EXTS:
                 imgs.extend(vdir.glob(ext))
             imgs = sorted(set(imgs))
+
             for img_p in imgs:
-                tasks.append((img_p, sp_dir.name, view))
+                is_test = _is_test_image(img_p)
+                if mode == "test" and is_test:
+                    tasks.append((img_p, sp_dir.name, view))
+                elif mode == "train" and not is_test:
+                    tasks.append((img_p, sp_dir.name, view))
     return tasks
 
 
@@ -123,33 +172,41 @@ def _load_checkpoint(dirs: dict) -> tuple[list[dict], set]:
 
 def run_batch(data_root: Path,
               out_root: Path,
+              mode: str = "train",
               save_images: bool = True,
               resume: bool = True) -> dict:
     """
-    Process the full dataset.
+    Process the dataset in either train or test mode.
 
     Parameters
     ----------
     data_root   : path to dataset/raw/
     out_root    : path to processed/ output folder
+    mode        : 'train' processes camera-named images (PXL_*, IMG_*, etc.)
+                  'test'  processes images prefixed with 'test_' (test_001..test_005)
+                  In test mode: no augmentation, features extracted directly for evaluation.
     save_images : save masked_raw + enhanced image files
-    resume      : skip images already in checkpoint
+    resume      : skip images already in checkpoint (train mode only)
 
     Returns
     -------
     summary dict
     """
     dirs  = _make_output_dirs(out_root)
-    tasks = _collect_images(data_root)
+    tasks = _collect_images(data_root, mode=mode)
 
     if not tasks:
-        print(f"[ERROR] No images found under {data_root}")
+        print(f"[ERROR] No {mode} images found under {data_root}")
+        print(f"  Reminder: test images must be named test_001.jpg ... test_005.jpg")
+        print(f"  Train images keep their original camera names (PXL_*, IMG_*, etc.)")
         return {}
 
-    print(f"Found {len(tasks)} images across {len(set(t[1] for t in tasks))} species")
+    print(f"[MODE: {mode.upper()}] Found {len(tasks)} images across "
+          f"{len(set(t[1] for t in tasks))} species")
 
-    # Resume support
-    success_rows, done_paths = _load_checkpoint(dirs) if resume else ([], set())
+    # Resume only makes sense for train (test set is tiny, always re-run cleanly)
+    do_resume = resume and (mode == "train")
+    success_rows, done_paths = _load_checkpoint(dirs) if do_resume else ([], set())
     failure_rows = []
 
     n_success = len(success_rows)
@@ -158,7 +215,7 @@ def run_batch(data_root: Path,
     start_ts  = datetime.now().isoformat()
 
     # Progress bar
-    with tqdm(total=len(tasks), unit="img", desc="Batch") as pbar:
+    with tqdm(total=len(tasks), unit="img", desc=f"Batch [{mode}]") as pbar:
         for i, (img_path, species, view) in enumerate(tasks):
 
             pbar.set_postfix(species=species[:12], view=view)
@@ -222,10 +279,32 @@ def run_batch(data_root: Path,
                 tqdm.write(f"  [CHECKPOINT] {n_success} ok, {n_fail} fail at image {i+1}")
 
     # ── Final outputs ─────────────────────────────────────────────────────────
+    METADATA_COLS = [
+        "species",
+        "view_side",
+        "image_path",
+        "mask_choice",
+        "coverage_pct",
+        "vein_coverage_pct",        # diagnostic from vein.py
+        "vein_roi_scale",           # diagnostic from vein.py
+    ]
+
     if success_rows:
         df_success = pd.DataFrame(success_rows)
-        df_success.to_csv(dirs["features"] / "vedavision_features.csv", index=False)
-        print(f"\n✓ Features saved: {len(df_success)} rows × {len(df_success.columns)} cols")
+        feature_cols = [c for c in df_success.columns if c not in METADATA_COLS]
+
+        # Mode-specific output filenames keep train and test CSVs clearly separate
+        full_csv = dirs["features"] / f"vedavision_features_{mode}.csv"
+        clf_csv  = dirs["features"] / f"vedavision_features_{mode}_clf.csv"
+
+        df_success.to_csv(full_csv, index=False)
+        df_success[feature_cols + ["species"]].to_csv(clf_csv, index=False)
+
+        print(f"\n✓ [{mode.upper()}] Features saved: {len(df_success)} rows × "
+              f"{len(feature_cols)} feature cols")
+        print(f"  Full CSV (with metadata) : {full_csv}")
+        print(f"  Classifier CSV (no meta) : {clf_csv}")
+        print(f"  Metadata cols excluded   : {METADATA_COLS}")
 
     if failure_rows:
         df_fail = pd.DataFrame(failure_rows)
@@ -233,6 +312,7 @@ def run_batch(data_root: Path,
         print(f"✗ Failures logged: {len(df_fail)} rows → {dirs['diagnostics'] / 'failures.csv'}")
 
     summary = {
+        "mode"          : mode,
         "run_start"     : start_ts,
         "run_end"       : datetime.now().isoformat(),
         "total_images"  : len(tasks),
@@ -242,10 +322,10 @@ def run_batch(data_root: Path,
         "success_rate"  : round(n_success / max(len(tasks) - n_skip, 1) * 100, 2),
         "failures_by_species": _count_by_species(failure_rows),
     }
-    with open(dirs["diagnostics"] / "report.json", "w") as jf:
+    with open(dirs["diagnostics"] / f"report_{mode}.json", "w") as jf:
         json.dump(summary, jf, indent=2)
 
-    print(f"\nBatch complete — {n_success} ok, {n_fail} fail, {n_skip} skipped")
+    print(f"\n[{mode.upper()}] Batch complete — {n_success} ok, {n_fail} fail, {n_skip} skipped")
     print(f"Success rate: {summary['success_rate']:.1f}%")
     return summary
 
@@ -295,6 +375,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VedaVision Batch Processor")
     parser.add_argument("--data",   default="dataset/raw",  help="Path to dataset/raw/")
     parser.add_argument("--out",    default="processed",    help="Output root directory")
+    parser.add_argument("--mode",   default="train",        choices=["train", "test"],
+                        help=(
+                            "train: process camera-named images (PXL_*, IMG_*, etc.) "
+                            "with augmentation. "
+                            "test: process images prefixed with 'test_' (test_001..test_005) "
+                            "without augmentation, for evaluation only."
+                        ))
     parser.add_argument("--no-images", action="store_true", help="Skip saving image files")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh (ignore checkpoints)")
     args = parser.parse_args()
@@ -302,6 +389,7 @@ if __name__ == "__main__":
     run_batch(
         data_root   = Path(args.data),
         out_root    = Path(args.out),
+        mode        = args.mode,
         save_images = not args.no_images,
         resume      = not args.no_resume,
     )

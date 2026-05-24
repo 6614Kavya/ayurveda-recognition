@@ -1,40 +1,31 @@
 """
-VedaVision — Shape Features  (shadow-robust revision)
-======================================================
+VedaVision — Shape Features  (shadow-robust revision  v2 — bug-fix)
+====================================================================
 Whole-leaf geometry from the binary mask.
 All features are dimensionless — a leaf at any zoom gives the same values.
 
-Shadow-robustness changes vs previous version
----------------------------------------------
+BUG FIXED in v2
+---------------
+convexity was computed as  area / hull_area  — which is IDENTICAL to solidity.
+The correct definition of convexity is the PERIMETER RATIO:
+
+    convexity = hull_perimeter / contour_perimeter
+
+A convex shape has hull_perim ≈ contour_perim  → convexity ≈ 1.0.
+A deeply lobed or pinnate outline has many notches  → contour_perim >> hull_perim
+→ convexity < 1.0.
+
+solidity  captures AREA fill (how much of the convex hull is occupied).
+convexity captures BOUNDARY smoothness (how close the outline is to a convex curve).
+They are complementary descriptors and must NOT be the same formula.
+
+Shadow-robustness notes (unchanged)
+------------------------------------
 Shape features operate on the BINARY MASK CONTOUR, not on pixel colour values,
 so they are naturally more robust to shadow contamination than colour or texture
-features.  However, shadow pixels at the leaf boundary slightly inflate the
-contour area and perimeter, which can shift ratio features.
-
-Fixes applied
-~~~~~~~~~~~~~
-1. ELLIPSE FIT (aspect ratio, elongation)
-   Shadow pixels are a minority at the boundary.  Ellipse fitting is a
-   least-squares optimisation over all contour points — minority outlier
-   points have small influence on the fitted ellipse.  No change needed
-   beyond what was already present.
-
-2. CONVEX HULL RATIOS (solidity, convexity)
-   Shadow boundary bumps slightly inflate both the contour area and the
-   hull area.  Because both numerator and denominator grow together,
-   the RATIO stays nearly constant.  Shadow has minimal effect.
-
-3. HU MOMENTS
-   NOW computed from the BINARY MASK image (cv2.moments on the mask
-   array), not from the contour.  This is more stable: the mask integrates
-   over all foreground pixels, so a few extra shadow pixels at the edge
-   produce negligible moment change.  Previously moments were computed
-   from cnt (contour object) which is more sensitive to boundary noise.
-
-4. REMOVED (scale-dependent — unchanged from previous version):
-   area_px, perimeter_px, eq_diameter_px, bbox_w, bbox_h, ellipse_angle
-
-All features are dimensionless ratios or log-normalised moment values.
+features.  Shadow pixels at the leaf boundary slightly inflate the contour area
+and perimeter, but because both numerator and denominator grow together in all
+ratios, the ratio values stay nearly constant.
 """
 
 import cv2
@@ -54,18 +45,19 @@ def extract_shape_features(leaf_mask: np.ndarray) -> dict:
     Returns
     -------
     dict with keys:
-        aspect_ratio, circularity, convexity, solidity, compactness,
-        elongation, hu_1 … hu_7
+        aspect_ratio  — bounding-box width / height
+        circularity   — 4π·area / perimeter²   (1.0 = perfect circle)
+        solidity      — contour area / convex-hull area   (fill ratio)
+        convexity     — hull perimeter / contour perimeter (boundary smoothness)
+        compactness   — contour area / bounding-box area
+        elongation    — minor axis / major axis of fitted ellipse
+        hu_1 … hu_7   — log-normalised Hu moments (from binary mask)
 
-    Shadow robustness
-    -----------------
-    All features are dimensionless ratios or log-normalised moments.
-    Ratios: numerator and denominator both shift by the same small delta
-            when shadow pixels are included → ratio stays stable.
-    Hu moments: computed on the binary mask (not the contour) so boundary
-                noise from shadow pixels has negligible influence.
-    Ellipse fit: least-squares over all contour points — minority shadow
-                 boundary points have small pull on the fitted ellipse.
+    Notes
+    -----
+    solidity  and convexity are now distinct features:
+        solidity  = area / hull_area        (AREA ratio — as before)
+        convexity = hull_perim / perim      (PERIMETER ratio — corrected)
     """
     cnts, _ = cv2.findContours(leaf_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not cnts:
@@ -77,22 +69,24 @@ def extract_shape_features(leaf_mask: np.ndarray) -> dict:
     x, y, w, h = cv2.boundingRect(cnt)
 
     # ── Basic ratios ──────────────────────────────────────────────────────
-    # Shadow adds ~equal pixels to both sides → ratio stable
     aspect_ratio = float(w) / h    if h > 0       else 0.0
     compactness  = area / (w * h)  if (w * h) > 0 else 0.0
     circularity  = (4.0 * np.pi * area / perim ** 2) if perim > 0 else 0.0
 
-    # ── Convex hull ratios ────────────────────────────────────────────────
-    # Both area and hull_area grow by the same shadow delta → ratio stable
-    hull      = cv2.convexHull(cnt)
-    hull_area = float(cv2.contourArea(hull))
-    hull_perim= float(cv2.arcLength(hull, closed=True))
+    # ── Convex hull ───────────────────────────────────────────────────────
+    hull       = cv2.convexHull(cnt)
+    hull_area  = float(cv2.contourArea(hull))
+    hull_perim = float(cv2.arcLength(hull, closed=True))
 
-    solidity  = area / hull_area   if hull_area  > 0 else 0.0
-    convexity = area / hull_area   if hull_area  > 0 else 0.0   # alias
+    # solidity  — how well the contour FILLS its convex hull (area ratio)
+    solidity   = area / hull_area        if hull_area  > 0 else 0.0
+
+    # convexity — how SMOOTH the boundary is relative to its convex hull
+    #             (perimeter ratio).  FIXED: was identical to solidity before.
+    #             hull_perim <= perim always, so convexity is in (0, 1].
+    convexity  = hull_perim / perim      if perim     > 0 else 0.0
 
     # ── Ellipse fit ───────────────────────────────────────────────────────
-    # Least-squares fit — shadow boundary points are minority outliers
     if len(cnt) >= 5:
         (_, _), (ma, mi), _ = cv2.fitEllipse(cnt)
         elongation = float(mi / ma) if ma > 0 else 0.0
@@ -101,8 +95,7 @@ def extract_shape_features(leaf_mask: np.ndarray) -> dict:
 
     # ── Hu moments from binary MASK (not contour) ─────────────────────────
     # cv2.moments on the full mask image integrates over all foreground
-    # pixels.  A few extra shadow pixels at the edge shift moments by
-    # a negligible amount compared to computing from the contour only.
+    # pixels — shadow pixels at the edge produce negligible influence.
     M      = cv2.moments(leaf_mask.astype(np.uint8))
     hu     = cv2.HuMoments(M).flatten()
     hu_log = -np.sign(hu) * np.log10(np.abs(hu) + 1e-10)
@@ -110,8 +103,8 @@ def extract_shape_features(leaf_mask: np.ndarray) -> dict:
     feats = {
         "aspect_ratio": aspect_ratio,
         "circularity" : circularity,
-        "convexity"   : convexity,
         "solidity"    : solidity,
+        "convexity"   : convexity,      # now hull_perim / perim, not area / hull_area
         "compactness" : compactness,
         "elongation"  : elongation,
     }
@@ -123,7 +116,7 @@ def extract_shape_features(leaf_mask: np.ndarray) -> dict:
 
 def _empty_shape_features() -> dict:
     feats = {k: 0.0 for k in [
-        "aspect_ratio", "circularity", "convexity", "solidity",
+        "aspect_ratio", "circularity", "solidity", "convexity",
         "compactness", "elongation",
     ]}
     for i in range(1, 8):
