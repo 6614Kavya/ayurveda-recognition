@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
-import 'dart:io';
+import 'package:http_parser/http_parser.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
@@ -16,31 +16,31 @@ void main() {
 // ─────────────────────────────────────────────────────────────────────────────
 class AppColors {
   // background gradient: #f5f1e6 → #e8f5e9
-  static const bgStart      = Color(0xFFF5F1E6);
-  static const bgEnd        = Color(0xFFE8F5E9);
+  static const bgStart = Color(0xFFF5F1E6);
+  static const bgEnd = Color(0xFFE8F5E9);
 
   // text
-  static const textPrimary  = Color(0xFF2E4D34);   // #2e4d34
-  static const titleColor   = Color(0xFF355E3B);   // #355e3b
-  static const sectionTitle = Color(0xFF4A7C59);   // #4a7c59
+  static const textPrimary = Color(0xFF2E4D34); // #2e4d34
+  static const titleColor = Color(0xFF355E3B); // #355e3b
+  static const sectionTitle = Color(0xFF4A7C59); // #4a7c59
 
   // card
-  static const cardBg       = Color(0xCCFFFFFF);   // #ffffffcc
-  static const cardShadow   = Color(0x14000000);   // rgba(0,0,0,0.08)
+  static const cardBg = Color(0xCCFFFFFF); // #ffffffcc
+  static const cardShadow = Color(0x14000000); // rgba(0,0,0,0.08)
 
   // button
-  static const buttonBg     = Color(0xFF6B8E23);   // #6b8e23
-  static const buttonText   = Colors.white;
+  static const buttonBg = Color(0xFF6B8E23); // #6b8e23
+  static const buttonText = Colors.white;
 
   // output panel
-  static const outputBg     = Color(0xFFF0F7F2);   // #f0f7f2
+  static const outputBg = Color(0xFFF0F7F2); // #f0f7f2
 
   // input border
-  static const inputBorder  = Color(0xFFCCCCCC);   // #ccc
+  static const inputBorder = Color(0xFFCCCCCC); // #ccc
 
   // loading / error
   static const loadingColor = Color(0xFF6B8E23);
-  static const errorColor   = Color(0xFFC0392B);   // #c0392b
+  static const errorColor = Color(0xFFC0392B); // #c0392b
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,12 +79,14 @@ class _HomePageState extends State<HomePage> {
 
   Map<String, dynamic>? _health;
   Map<String, dynamic>? _prediction;
-  bool _loading  = false;
+  bool _loading = false;
   String? _error;
 
   // ── API: ping health endpoint ───────────────────────────────────
   Future<void> _checkHealth() async {
-    setState(() { _error = null; });
+    setState(() {
+      _error = null;
+    });
     try {
       final res = await http.get(Uri.parse('$apiBase/health'));
       setState(() {
@@ -105,8 +107,8 @@ class _HomePageState extends State<HomePage> {
     if (picked == null) return;
 
     setState(() {
-      _loading    = true;
-      _error      = null;
+      _loading = true;
+      _error = null;
       _prediction = null;
     });
 
@@ -115,25 +117,45 @@ class _HomePageState extends State<HomePage> {
         'POST',
         Uri.parse('$apiBase/predict/$endpoint'),
       );
+
+      final bytes = await picked.readAsBytes();
+
+      // Figure out the correct MIME type from the filename extension
+      final ext = picked.name.split('.').last.toLowerCase();
+      final mimeType = (ext == 'png') ? 'png' : 'jpeg';
+
       request.files.add(
-        await http.MultipartFile.fromPath('file', picked.path),
+        http.MultipartFile.fromBytes(
+          'file',
+          bytes,
+          filename: picked.name,
+          contentType: MediaType('image', mimeType), // ← the key addition
+        ),
       );
+
       final streamed = await request.send();
-      final res      = await http.Response.fromStream(streamed);
-      final body     = jsonDecode(res.body);
+      final res = await http.Response.fromStream(streamed);
+      final body = jsonDecode(res.body);
 
       if (res.statusCode == 200) {
-        setState(() { _prediction = body as Map<String, dynamic>; });
+        setState(() {
+          _prediction = body as Map<String, dynamic>;
+        });
       } else {
         setState(() {
-          _error = (body as Map<String, dynamic>)['detail']?.toString()
-                   ?? 'Upload failed';
+          _error =
+              (body as Map<String, dynamic>)['detail']?.toString() ??
+              'Upload failed';
         });
       }
     } catch (e) {
-      setState(() { _error = 'Upload failed: $e'; });
+      setState(() {
+        _error = 'Upload failed: $e';
+      });
     } finally {
-      setState(() { _loading = false; });
+      setState(() {
+        _loading = false;
+      });
     }
   }
 
@@ -146,7 +168,7 @@ class _HomePageState extends State<HomePage> {
         decoration: const BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topLeft,
-            end:   Alignment.bottomRight,
+            end: Alignment.bottomRight,
             colors: [AppColors.bgStart, AppColors.bgEnd],
           ),
         ),
@@ -181,8 +203,9 @@ class _HomePageState extends State<HomePage> {
                       if (_health != null) ...[
                         const SizedBox(height: 12),
                         _OutputPanel(
-                          text: const JsonEncoder.withIndent('  ')
-                              .convert(_health),
+                          text: const JsonEncoder.withIndent(
+                            '  ',
+                          ).convert(_health),
                         ),
                       ],
                     ],
@@ -197,21 +220,21 @@ class _HomePageState extends State<HomePage> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       _UploadRow(
-                        emoji:    '🌸',
-                        label:    'Flower Image',
-                        onPick:   () => _handleUpload('flower'),
+                        emoji: '🌸',
+                        label: 'Flower Image',
+                        onPick: () => _handleUpload('flower'),
                       ),
                       const SizedBox(height: 16),
                       _UploadRow(
-                        emoji:    '🍃',
-                        label:    'Single Leaf Image',
-                        onPick:   () => _handleUpload('single-leaf'),
+                        emoji: '🍃',
+                        label: 'Single Leaf Image',
+                        onPick: () => _handleUpload('single-leaf'),
                       ),
                       const SizedBox(height: 16),
                       _UploadRow(
-                        emoji:    '🌿',
-                        label:    'Compound Leaf Image',
-                        onPick:   () => _handleUpload('compound-leaf'),
+                        emoji: '🌿',
+                        label: 'Compound Leaf Image',
+                        onPick: () => _handleUpload('compound-leaf'),
                       ),
                     ],
                   ),
@@ -223,9 +246,9 @@ class _HomePageState extends State<HomePage> {
                   const Text(
                     'Analyzing plant...',
                     style: TextStyle(
-                      color:      AppColors.loadingColor,
+                      color: AppColors.loadingColor,
                       fontWeight: FontWeight.bold,
-                      fontSize:   15,
+                      fontSize: 15,
                     ),
                   ),
 
@@ -233,9 +256,9 @@ class _HomePageState extends State<HomePage> {
                   Text(
                     _error!,
                     style: const TextStyle(
-                      color:      AppColors.errorColor,
+                      color: AppColors.errorColor,
                       fontWeight: FontWeight.bold,
-                      fontSize:   15,
+                      fontSize: 15,
                     ),
                   ),
 
@@ -245,8 +268,9 @@ class _HomePageState extends State<HomePage> {
                   _AppCard(
                     title: 'Prediction Result',
                     child: _OutputPanel(
-                      text: const JsonEncoder.withIndent('  ')
-                          .convert(_prediction),
+                      text: const JsonEncoder.withIndent(
+                        '  ',
+                      ).convert(_prediction),
                     ),
                   ),
                 ],
@@ -272,13 +296,13 @@ class _AppCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color:        AppColors.cardBg,
+        color: AppColors.cardBg,
         borderRadius: BorderRadius.circular(16),
         boxShadow: const [
           BoxShadow(
-            color:      AppColors.cardShadow,
+            color: AppColors.cardShadow,
             blurRadius: 20,
-            offset:     Offset(0, 8),
+            offset: Offset(0, 8),
           ),
         ],
       ),
@@ -289,9 +313,9 @@ class _AppCard extends StatelessWidget {
           Text(
             title,
             style: const TextStyle(
-              fontSize:   18,
+              fontSize: 18,
               fontWeight: FontWeight.w600,
-              color:      AppColors.sectionTitle,
+              color: AppColors.sectionTitle,
             ),
           ),
           const SizedBox(height: 16),
@@ -319,15 +343,10 @@ class _AppButton extends StatelessWidget {
         backgroundColor: AppColors.buttonBg,
         foregroundColor: AppColors.buttonText,
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
         elevation: 0,
       ),
-      child: Text(
-        label,
-        style: const TextStyle(fontSize: 14),
-      ),
+      child: Text(label, style: const TextStyle(fontSize: 14)),
     );
   }
 }
@@ -337,8 +356,8 @@ class _AppButton extends StatelessWidget {
 // Each row shows a label and a "Choose File" button that opens gallery
 // ─────────────────────────────────────────────────────────────────────────────
 class _UploadRow extends StatelessWidget {
-  final String    emoji;
-  final String    label;
+  final String emoji;
+  final String label;
   final VoidCallback onPick;
 
   const _UploadRow({
@@ -352,7 +371,7 @@ class _UploadRow extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        border:       Border.all(color: AppColors.inputBorder),
+        border: Border.all(color: AppColors.inputBorder),
         borderRadius: BorderRadius.circular(6),
       ),
       child: Row(
@@ -363,8 +382,8 @@ class _UploadRow extends StatelessWidget {
               '$emoji $label',
               style: const TextStyle(
                 fontWeight: FontWeight.w500,
-                color:      AppColors.textPrimary,
-                fontSize:   14,
+                color: AppColors.textPrimary,
+                fontSize: 14,
               ),
             ),
           ),
@@ -387,19 +406,19 @@ class _OutputPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width:       double.infinity,
-      padding:     const EdgeInsets.all(16),
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color:        AppColors.outputBg,
+        color: AppColors.outputBg,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Text(
         text,
         style: const TextStyle(
           fontFamily: 'monospace',
-          fontSize:   13,
-          color:      AppColors.textPrimary,
-          height:     1.5,
+          fontSize: 13,
+          color: AppColors.textPrimary,
+          height: 1.5,
         ),
       ),
     );

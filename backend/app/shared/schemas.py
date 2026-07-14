@@ -1,13 +1,13 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import List
 
 class PredictionResponse(BaseModel):
-    plant_name: str
-    confidence: float
-    module: str
-    sinhala_name: Optional[str] = None
-    uses: Optional[str] = None
-    diseases_treated: Optional[list[str]] = None
+    plant_name       : str
+    confidence       : float
+    module           : str
+    sinhala_name     : str = ""
+    uses             : str = ""
+    diseases_treated : List[str] = []
 
 class HealthResponse(BaseModel):
     status: str
