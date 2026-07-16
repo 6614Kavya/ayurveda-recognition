@@ -88,6 +88,102 @@ import numpy as np
 from skimage.morphology import skeletonize
 from preprocessing.config import GLCM_DIST, GLCM_ANGLES   # kept for config parity
 
+_BOTANICAL_SENTINEL = -1.0
+
+
+def _extract_botanical_vein_features(gray_work: np.ndarray, gray_eq: np.ndarray,
+                                      vein_skel_work: np.ndarray,
+                                      mask_work: np.ndarray) -> dict:
+    """
+    BOTANICAL / HANDCRAFTED additions, prefixed `botanical_`.
+    Computed at WORK_SIZE resolution (already scale-normalised by the
+    ROI-upscale step above) so no extra scale correction is needed here.
+
+    botanical_vein_spacing_period — distance (px, at WORK_SIZE) between
+        adjacent parallel secondary veins. Targets Kathurupila (closely
+        spaced, "comb-like ribbed" veins) vs Nil_Awariya (widely spaced,
+        faint venation). Computed by projecting vein-skeleton pixels onto
+        the axis PERPENDICULAR to the leaf's principal axis (found via a
+        lightweight local PCA on mask_work -- not the same graph-based
+        rachis axis used in shape.py, kept independent to avoid an
+        import dependency between feature_extraction modules) and taking
+        the first non-zero-lag peak of the autocorrelation of that
+        1-D projection profile.
+
+    botanical_vein_prominence_contrast — how strongly veins stand out
+        from the surrounding blade tone. Targets Kathurupila (strongly
+        raised, closely ribbed) vs Nil_Awariya (faint, barely raised),
+        and Kalawal (fine visible venation) vs Kattakumanjal (glossy
+        surface muting venation visibility). Computed as the mean
+        absolute difference between the equalised grayscale at vein
+        pixels and a heavily blurred ("local blade tone") version of the
+        same image at those pixels, normalised by the blade's own tonal
+        spread so the feature stays comparable across images of
+        different overall contrast.
+
+    STATUS: not yet visually validated against real Kathurupila /
+    Nil_Awariya or Kalawal / Kattakumanjal photos.
+    """
+    feats = {}
+    vein_px = vein_skel_work > 0
+    mask_px = mask_work > 0
+
+    if vein_px.sum() < 20 or mask_px.sum() < 100:
+        feats["botanical_vein_spacing_period"] = _BOTANICAL_SENTINEL
+        feats["botanical_vein_prominence_contrast"] = _BOTANICAL_SENTINEL
+        return feats
+
+    # ── Vein spacing periodicity ────────────────────────────────────────
+    try:
+        ys, xs = np.nonzero(mask_px)
+        pts = np.stack([xs, ys], axis=1).astype(np.float64)
+        mean = pts.mean(axis=0)
+        _, _, vt = np.linalg.svd(pts - mean, full_matrices=False)
+        principal = vt[0]                       # leaf's long axis
+        perpendicular = np.array([-principal[1], principal[0]])  # cross-vein axis
+
+        vys, vxs = np.nonzero(vein_px)
+        vein_pts = np.stack([vxs, vys], axis=1).astype(np.float64)
+        proj = (vein_pts - mean) @ perpendicular
+
+        # 1-D histogram of vein-pixel projections = "how many vein pixels
+        # cross this line perpendicular to the leaf" -- parallel veins
+        # produce a periodic signal in this histogram.
+        n_bins = max(20, int(proj.max() - proj.min()))
+        hist, _ = np.histogram(proj, bins=n_bins)
+        hist = hist.astype(np.float64) - hist.mean()
+
+        autocorr = np.correlate(hist, hist, mode="full")
+        autocorr = autocorr[len(autocorr) // 2:]  # keep zero-lag onward
+        # first local max after lag 0 = dominant spacing period
+        if len(autocorr) > 5:
+            d = np.diff(autocorr)
+            rising = np.where((d[:-1] < 0) & (d[1:] >= 0))[0]
+            # first local minimum (trough) marks where autocorr starts
+            # rising back up toward the next periodic peak
+            if len(rising) > 0:
+                search_start = rising[0] + 1
+                peak_lag = search_start + int(np.argmax(autocorr[search_start:search_start + n_bins // 2]))
+                feats["botanical_vein_spacing_period"] = float(peak_lag)
+            else:
+                feats["botanical_vein_spacing_period"] = _BOTANICAL_SENTINEL
+        else:
+            feats["botanical_vein_spacing_period"] = _BOTANICAL_SENTINEL
+    except Exception:
+        feats["botanical_vein_spacing_period"] = _BOTANICAL_SENTINEL
+
+    # ── Vein prominence / contrast ──────────────────────────────────────
+    try:
+        blade_tone = cv2.GaussianBlur(gray_eq, (0, 0), sigmaX=25)
+        diff = np.abs(gray_eq.astype(np.float64) - blade_tone.astype(np.float64))
+        vein_contrast = diff[vein_px].mean()
+        blade_spread = gray_eq[mask_px].astype(np.float64).std() + 1e-6
+        feats["botanical_vein_prominence_contrast"] = float(vein_contrast / blade_spread)
+    except Exception:
+        feats["botanical_vein_prominence_contrast"] = _BOTANICAL_SENTINEL
+
+    return feats
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -190,7 +286,7 @@ def _build_vein_map(gray_work: np.ndarray,
     # Step E: Skeletonise → 1-px vein centrelines
     vein_skel = skeletonize(vein_binary > 0).astype(np.uint8) * 255
 
-    return vein_skel, vein_binary
+    return vein_skel, vein_binary, gray_eq
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +335,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
             "vein_density": 0.0, "vein_length_ratio": 0.0,
             "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
             "vein_coverage_pct": 0.0, "vein_roi_scale": 1.0,
+            "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
+            "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
         }, empty, empty
 
     # ── Diagnostic: coverage in original frame ────────────────────────────
@@ -253,6 +351,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
             "vein_density": 0.0, "vein_length_ratio": 0.0,
             "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
             "vein_coverage_pct": round(coverage_pct, 4), "vein_roi_scale": 1.0,
+            "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
+            "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
         }, empty, empty
 
     x1, y1, x2, y2 = bbox
@@ -268,6 +368,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
             "vein_density": 0.0, "vein_length_ratio": 0.0,
             "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
             "vein_coverage_pct": round(coverage_pct, 4), "vein_roi_scale": 0.0,
+            "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
+            "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
         }, empty, empty
 
     # ── Step 2: Upscale crop to WORK_SIZE ─────────────────────────────────
@@ -280,7 +382,7 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     mask_work = (mask_work > 127).astype(np.uint8) * 255
 
     # ── Steps 3-5: CLAHE → top-hat → threshold → skeleton ────────────────
-    vein_skel_work, vein_binary_work = _build_vein_map(gray_work, mask_work)
+    vein_skel_work, vein_binary_work, gray_eq_work = _build_vein_map(gray_work, mask_work)
 
     # ── Step 6: Downscale results back to original crop size ──────────────
     # INTER_NEAREST preserves binary structure (no new grey values created).
@@ -326,5 +428,17 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     # ── Diagnostic columns (not used by classifier, for audit CSV only) ───
     feats["vein_coverage_pct"] = round(coverage_pct, 4)
     feats["vein_roi_scale"]    = round(roi_scale, 4)
+
+    # ── NEW: botanical vein-spacing / prominence features ──────────────────
+    # Computed at WORK_SIZE resolution (before downscale) so they inherit
+    # the same small-leaf-stable scale normalisation as the density
+    # features above -- see module docstring.
+    try:
+        botanical_f = _extract_botanical_vein_features(
+            gray_work, gray_eq_work, vein_skel_work, mask_work)
+        feats.update(botanical_f)
+    except Exception:
+        feats["botanical_vein_spacing_period"] = _BOTANICAL_SENTINEL
+        feats["botanical_vein_prominence_contrast"] = _BOTANICAL_SENTINEL
 
     return feats, vein_skel, vein_binary

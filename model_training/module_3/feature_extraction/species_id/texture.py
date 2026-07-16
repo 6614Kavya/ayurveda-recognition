@@ -39,6 +39,44 @@ from preprocessing.config import LBP_RADIUS, LBP_POINTS, GLCM_DIST, GLCM_ANGLES
 _SHADOW_V_THRESH = 40   # HSV Value below this inside the mask → probable shadow
                         # Conservative: real deep-green leaves have V ≈ 60-100
 
+_BOTANICAL_SENTINEL = -1.0
+
+
+def _extract_botanical_texture_features(img_sharp_bgr: np.ndarray,
+                                         confident_mask: np.ndarray) -> dict:
+    """
+    BOTANICAL / HANDCRAFTED addition, prefixed `botanical_`.
+    A single backup cross-check feature, deliberately minimal — the
+    primary signals for the traits this could address (glossiness,
+    reticulation density) already live in colour.py and vein.py; this is
+    a secondary confirmation, not a new primary signal, so scope is kept
+    small here rather than duplicating machinery.
+
+    botanical_local_contrast_variance — spatial variance of local
+    micro-contrast (std of L in small windows) across the leaf. Glossy
+    surfaces (Kattakumanjal) show patchy local contrast from specular
+    highlights; matte surfaces (Kalawal) and leaves with a fine, uniform
+    reticulate network (Siyabala) show more spatially uniform local
+    contrast. Backs up botanical_gloss_* in colour.py.
+
+    STATUS: not yet visually validated on real photos.
+    """
+    if confident_mask.sum() < 200:
+        return {"botanical_local_contrast_variance": _BOTANICAL_SENTINEL}
+    try:
+        lab_l = cv2.cvtColor(img_sharp_bgr, cv2.COLOR_BGR2LAB)[:, :, 0].astype(np.float32)
+        # local std via a small sliding window (mean of squares - square of mean)
+        k = 7
+        mean = cv2.blur(lab_l, (k, k))
+        mean_sq = cv2.blur(lab_l * lab_l, (k, k))
+        local_std = np.sqrt(np.clip(mean_sq - mean * mean, 0, None))
+        vals = local_std[confident_mask]
+        # variance OF the local-contrast map -- patchiness, not overall texture level
+        variance_of_local_contrast = float(np.var(vals)) if len(vals) else 0.0
+        return {"botanical_local_contrast_variance": variance_of_local_contrast}
+    except Exception:
+        return {"botanical_local_contrast_variance": _BOTANICAL_SENTINEL}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -128,5 +166,11 @@ def extract_texture_features(img_sharp_bgr: np.ndarray,
         feats[f"lbp_{bi:02d}"] = float(bv)
     feats["lbp_mean"] = float(lbp_vals.mean()) if len(lbp_vals) else 0.0
     feats["lbp_std"]  = float(lbp_vals.std())  if len(lbp_vals) else 0.0
+
+    # ── NEW: botanical local-contrast-variance (glossiness backup) ────────
+    try:
+        feats.update(_extract_botanical_texture_features(img_sharp_bgr, confident_mask))
+    except Exception:
+        feats["botanical_local_contrast_variance"] = _BOTANICAL_SENTINEL
 
     return feats

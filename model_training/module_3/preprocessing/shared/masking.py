@@ -59,7 +59,42 @@ from preprocessing.config import MIN_COMP_FRAC, SIGMA_THRESH
 # ══════════════════════════════════════════════════════════════════════════════
 # INTERNAL HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
+def estimate_illumination(img_resized, grid=16):
+    """Estimate a smooth brightness field from paper-dominated tiles,
+    using percentile robustness instead of a prior mask."""
+    lab = cv2.cvtColor(img_resized, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L = lab[:, :, 0]
+    h, w = L.shape
+    th, tw = h // grid, w // grid
 
+    tile_L = np.zeros((grid, grid), np.float32)
+    for i in range(grid):
+        for j in range(grid):
+            tile = L[i*th:(i+1)*th, j*tw:(j+1)*tw]
+            tile_L[i, j] = np.percentile(tile, 90)  # robust to a leaf corner
+
+    # confident-paper tiles = brighter half of all tiles
+    paper_thresh = np.percentile(tile_L, 50)
+    paper_mask = tile_L >= paper_thresh
+    target_L = tile_L[paper_mask].mean()
+
+    # fill non-paper tiles by interpolation, then upsample to full res
+    tile_L_filled = tile_L.copy()
+    if (~paper_mask).any():
+        ys, xs = np.where(paper_mask)
+        vals = tile_L[paper_mask]
+        yy, xx = np.mgrid[0:grid, 0:grid]
+        tile_L_filled = griddata((ys, xs), vals, (yy, xx), method='linear', fill_value=target_L)
+
+    illum = cv2.resize(tile_L_filled, (w, h), interpolation=cv2.INTER_CUBIC)
+    return illum, target_L
+
+def flatten_illumination(img_resized):
+    illum, target_L = estimate_illumination(img_resized)
+    ratio = np.clip(target_L / np.maximum(illum, 1e-3), 0.6, 1.8)  # clamp to avoid noise blowup
+    img_f = img_resized.astype(np.float32)
+    flattened = np.clip(img_f * ratio[:, :, None], 0, 255).astype(np.uint8)
+    return flattened
 def _remove_noise(mask: np.ndarray,
                   min_frac: float = MIN_COMP_FRAC,
                   img_area: int = 512 * 512) -> np.ndarray:
@@ -433,6 +468,7 @@ def select_mask(img_resized: np.ndarray,
     8 → Hole fill (BEFORE _remove_noise)
     9 → Final close + clean + padding exclusion
     """
+    
     img_area      = img_resized.shape[0] * img_resized.shape[1]
     img_lab_u8    = cv2.cvtColor(img_resized, cv2.COLOR_BGR2LAB)
     img_lab_float = img_lab_u8.astype(np.float32)

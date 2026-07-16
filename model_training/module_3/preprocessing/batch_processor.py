@@ -16,11 +16,11 @@ Processes the full dataset folder hierarchy and produces:
   • diagnostics/failures.csv                      — QC-failed / exception rows
   • diagnostics/failures/<species>/<view>/        — copies of failed images
   • diagnostics/per_image/                        — per-image JSON diagnostics
-  • diagnostics/report.json                       — full batch summary
+  • diagnostics/report_<mode>.json                — full batch summary
 
 Image naming convention (REQUIRED):
-    train images → filename starts with  "train_"   e.g. train_001.jpg
     test  images → filename starts with  "test_"    e.g. test_001.jpg
+    train images → any other filename (camera-named, e.g. PXL_*, IMG_*)
 
     Same leaf ID (e.g. test_003) must appear in both top/ and bottom/ for that species.
     This enforces leaf-level train/test separation (no pseudo-replication).
@@ -29,15 +29,29 @@ Dataset folder structure expected:
     dataset/raw/
         <species>/
             top/
-                train_001.jpg ... train_030.jpg
+                PXL_*.jpg ... (train, original camera names)
+                test_001.jpg  ... test_005.jpg
                 test_001.jpg  ... test_005.jpg
             bottom/
-                train_001.jpg ... train_030.jpg
+                PXL_*.jpg ... (train, original camera names)
                 test_001.jpg  ... test_005.jpg
 
 Run:
     python -m preprocessing.batch_processor --data dataset/raw --out processed --mode train
     python -m preprocessing.batch_processor --data dataset/raw --out processed --mode test
+
+── MASKING ARCHITECTURE (updated this session) ──────────────────────────────
+Masking is now computed ONCE per source image, on the clean unaugmented
+photo. The resulting mask is then carried through the SAME geometric
+transforms (flip/rotate) as each augmented image copy, via Albumentations'
+native mask target support. Photometric transforms (brightness, hue, blur,
+noise, shadow) apply to the image only and never touch the mask.
+
+This replaces the earlier approach of independently re-deriving the mask
+(by colour) on each photometrically-augmented variant, which was found to
+fail when RandomShadow landed directly on a leaflet — desaturating real
+leaf pixels enough to fail the seed/candidate colour gates in masking.py,
+causing whole leaflets to be dropped as background in some augmented rows.
 """
 
 import cv2
@@ -53,9 +67,14 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing.species_id.pipeline import run_pipeline
+from preprocessing.shared.resize import letterbox_resize
+from preprocessing.shared.masking import qc_check
+from preprocessing.shared.mask_guard import select_mask_guarded
+from preprocessing.shared.augmentation import augment_resized_with_mask_and_original, N_AUGMENTATIONS
+from preprocessing.species_id.pipeline import run_pipeline_from_resized
 from preprocessing.config import (
     VIEWS, IMG_EXTS, CHECKPOINT_EVERY,
+    TARGET_LONG,
     QC_MIN_COVERAGE, QC_MAX_COVERAGE
 )
 
@@ -228,39 +247,113 @@ def run_batch(data_root: Path,
 
             # ── Per-image try/except ───────────────────────────────────────
             try:
-                feats, info = run_pipeline(img_path, species, view)
+                img_bgr = cv2.imread(str(img_path))
+                if img_bgr is None:
+                    raise ValueError(f"cv2.imread returned None — unreadable file: {img_path}")
 
-                diag_payload = {
-                    "image_path" : str(img_path),
-                    "species"    : species,
-                    "view_side"  : view,
-                    "qc_passed"  : info["qc_passed"],
-                    "qc_reason"  : info["qc_reason"],
-                    "mask_diag"  : info.get("mask_diag", {}),
-                }
+                # ── Step 1+2 ONCE on the clean original: resize + mask ──────
+                # CHANGED: was select_mask() (no shadow-bleed guard). This
+                # bypassed mask_guard.py entirely for every training image —
+                # the guard was only reachable via pipeline.py's run_pipeline()
+                # single-image path, never via the batch path that actually
+                # produces the training CSV. select_mask_guarded() is a
+                # drop-in replacement (same (mask, choice, diag) return shape)
+                # that picks whichever of baseline/flattened has lower
+                # measured shadow-bleed without losing foreground area.
+                img_resized_orig, resize_meta = letterbox_resize(img_bgr, TARGET_LONG)
+                mask_orig, mask_choice_orig, mask_diag_orig = select_mask_guarded(img_resized_orig)
+                qc_passed_orig, qc_reason_orig = qc_check(mask_diag_orig)
 
-                if feats is None:
-                    # QC fail
-                    _record_failure(img_path, species, view,
-                                    info["qc_reason"], "QC_FAIL",
-                                    dirs, failure_rows)
+                if not qc_passed_orig:
+                    # Original itself fails QC — no point generating augmented
+                    # variants from a mask we already know is bad.
+                    _record_failure(img_path, species, view, qc_reason_orig, "QC_FAIL",
+                                     dirs, failure_rows)
                     n_fail += 1
+
                 else:
-                    success_rows.append(feats)
-                    n_success += 1
-
-                    # Save processed images
-                    if save_images and info.get("img_masked") is not None:
-                        _save_processed_images(
-                            info["img_masked"],
-                            info["img_sharp"],
-                            img_path, species, view, out_root / "images"
+                    # ── Build (image, mask) variant pairs ────────────────────
+                    if mode == "train":
+                        variants = augment_resized_with_mask_and_original(
+                            img_resized_orig, mask_orig, n=N_AUGMENTATIONS
                         )
+                        # variants[0] = (original resized image, original mask)
+                        # variants[1..N] = (augmented image, geometrically-warped mask)
+                    else:
+                        variants = [(img_resized_orig, mask_orig)]   # test: no augmentation
 
-                # Per-image JSON diagnostic
-                json_path = dirs["per_image"] / f"{img_path.stem}_{view}.json"
-                with open(json_path, "w") as jf:
-                    json.dump(diag_payload, jf, indent=2)
+                    any_qc_passed = False
+                    aug_success   = 0
+                    aug_fail      = 0
+
+                    for aug_idx, (img_resized_variant, mask_variant) in enumerate(variants):
+                        aug_label = "original" if aug_idx == 0 else f"aug_{aug_idx:02d}"
+
+                        try:
+                            feats, info = run_pipeline_from_resized(
+                                img_path, species, view,
+                                img_resized_variant, mask_variant
+                            )
+
+                            diag_payload = {
+                                "image_path" : str(img_path),
+                                "aug_label"  : aug_label,
+                                "species"    : species,
+                                "view_side"  : view,
+                                "qc_passed"  : info["qc_passed"],
+                                "qc_reason"  : info["qc_reason"],
+                                "mask_diag"  : info.get("mask_diag", {}),
+                            }
+
+                            if feats is None:
+                                # QC fail on this variant (rare now — mask is
+                                # inherited from the already-passed original,
+                                # only geometric rounding could shift it)
+                                aug_fail += 1
+                                if aug_idx == 0:
+                                    _record_failure(img_path, species, view,
+                                                     info["qc_reason"], "QC_FAIL",
+                                                     dirs, failure_rows)
+                                    n_fail += 1
+                            else:
+                                feats["aug_label"] = aug_label
+                                success_rows.append(feats)
+                                aug_success  += 1
+                                any_qc_passed = True
+
+                                # Save processed images only for the ORIGINAL
+                                # (augmented processed images are not saved —
+                                # cheap to regenerate on demand)
+                                if aug_idx == 0 and save_images and info.get("img_masked") is not None:
+                                    _save_processed_images(
+                                        info["img_masked"],
+                                        info["img_sharp"],
+                                        img_path, species, view, out_root / "images"
+                                    )
+
+                            # Per-image JSON diagnostic (original only, avoids clutter)
+                            if aug_idx == 0:
+                                json_path = dirs["per_image"] / f"{img_path.stem}_{view}.json"
+                                with open(json_path, "w") as jf:
+                                    json.dump(diag_payload, jf, indent=2)
+
+                        except Exception as aug_exc:
+                            aug_fail += 1
+                            if aug_idx == 0:
+                                tb = traceback.format_exc()
+                                _record_failure(img_path, species, view, str(aug_exc),
+                                                 "EXCEPTION", dirs, failure_rows, traceback_str=tb)
+                                n_fail += 1
+
+                    # Count this source image as one success if any variant passed
+                    # (this must run AFTER the aug loop finishes, not inside its
+                    # except block — that misplacement was the earlier bug that
+                    # caused 0 success / 0 fail / 0 rows despite the loop running)
+                    if any_qc_passed:
+                        n_success += 1
+                        if aug_fail > 0:
+                            tqdm.write(f"  {img_path.name} [{species}/{view}] "
+                                       f"— {aug_success}/{len(variants)} variants ok")
 
             except Exception as exc:
                 tb = traceback.format_exc()
@@ -289,22 +382,67 @@ def run_batch(data_root: Path,
         "vein_roi_scale",           # diagnostic from vein.py
     ]
 
+    # FEATURE_DROP_COLS: columns that ARE real numeric features (unlike
+    # METADATA_COLS above) but are excluded from the classifier-ready CSV.
+    # Kept in the full CSV for diagnostics/QC; dropped only from *_clf.csv.
+    #
+    #   whole_area_cv / whole_area_max_min_ratio / whole_spacing_cv
+    #     -1.0 sentinel in ~88-94% of rows (verified on the current training
+    #     export) because they require >=2 connected components, and most
+    #     compound-leaf photos in this dataset merge into a single component
+    #     (touching/overlapping leaflets — the documented masking
+    #     limitation). Left in, the -1.0 sentinel is treated as a real low
+    #     value by StandardScaler/tree splits, actively misleading the
+    #     model. whole_aspect, n_components_norm, symmetry_lr_ratio and
+    #     symmetry_score are NOT dropped — they degrade to a sane default
+    #     (not a sentinel) in the single-component case, so they stay.
+    #
+    #   colour_hsv_v_* / colour_bgr_g_* / colour_bgr_r_*
+    #     Verified >0.97 correlated with colour_lab_l_* (up to r=0.999 for
+    #     hsv_v vs lab_l) on the current training export — HSV-V, LAB-L and
+    #     BGR-G/R are all measuring the same "how bright is this leaf"
+    #     signal, since these images have a narrow green hue band and
+    #     brightness dominates channel variance. LAB is kept as the single
+    #     brightness representative (perceptually decoupled from hue,
+    #     matches how colour.py already treats L separately from a/b).
+    #     colour_bgr_b_* is kept (least correlated of the three BGR
+    #     channels — carries the most non-redundant signal). This drops 18
+    #     of 146 feature columns.
+    FEATURE_DROP_COLS = [
+        "whole_area_cv", "whole_area_max_min_ratio", "whole_spacing_cv",
+    ] + [f"colour_hsv_v_{suf}" for suf in ("median", "iqr", "q25", "q75", "skew", "kurt")] \
+      + [f"colour_bgr_g_{suf}" for suf in ("median", "iqr", "q25", "q75", "skew", "kurt")] \
+      + [f"colour_bgr_r_{suf}" for suf in ("median", "iqr", "q25", "q75", "skew", "kurt")]
+
     if success_rows:
         df_success = pd.DataFrame(success_rows)
-        feature_cols = [c for c in df_success.columns if c not in METADATA_COLS]
+        feature_cols = [c for c in df_success.columns
+                         if c not in METADATA_COLS + FEATURE_DROP_COLS + ["aug_label"]]
 
-        # Mode-specific output filenames keep train and test CSVs clearly separate
         full_csv = dirs["features"] / f"vedavision_features_{mode}.csv"
         clf_csv  = dirs["features"] / f"vedavision_features_{mode}_clf.csv"
 
         df_success.to_csv(full_csv, index=False)
-        df_success[feature_cols + ["species"]].to_csv(clf_csv, index=False)
+        # image_path included in train clf CSV so StratifiedGroupKFold
+        # can group augmented rows by their source physical leaf.
+        # Excluded from test clf CSV (not needed for evaluation).
+        if mode == "train":
+            df_success[feature_cols + ["species", "image_path"]].to_csv(clf_csv, index=False)
+        else:
+            df_success[feature_cols + ["species"]].to_csv(clf_csv, index=False)
 
-        print(f"\n✓ [{mode.upper()}] Features saved: {len(df_success)} rows × "
-              f"{len(feature_cols)} feature cols")
+        n_original_rows = len(df_success[df_success["aug_label"] == "original"]) \
+                          if "aug_label" in df_success.columns else len(df_success)
+        n_aug_rows      = len(df_success) - n_original_rows
+
+        print(f"\n✓ [{mode.upper()}] Features saved: {len(df_success)} total rows "
+              f"× {len(feature_cols)} feature cols")
+        if mode == "train":
+            print(f"  Original rows : {n_original_rows}")
+            print(f"  Augmented rows: {n_aug_rows}  "
+                  f"({N_AUGMENTATIONS} variants × {n_original_rows} originals)")
         print(f"  Full CSV (with metadata) : {full_csv}")
         print(f"  Classifier CSV (no meta) : {clf_csv}")
-        print(f"  Metadata cols excluded   : {METADATA_COLS}")
 
     if failure_rows:
         df_fail = pd.DataFrame(failure_rows)
@@ -312,21 +450,25 @@ def run_batch(data_root: Path,
         print(f"✗ Failures logged: {len(df_fail)} rows → {dirs['diagnostics'] / 'failures.csv'}")
 
     summary = {
-        "mode"          : mode,
-        "run_start"     : start_ts,
-        "run_end"       : datetime.now().isoformat(),
-        "total_images"  : len(tasks),
-        "n_success"     : n_success,
-        "n_fail"        : n_fail,
-        "n_skip"        : n_skip,
-        "success_rate"  : round(n_success / max(len(tasks) - n_skip, 1) * 100, 2),
+        "mode"               : mode,
+        "n_augmentations"    : N_AUGMENTATIONS if mode == "train" else 0,
+        "run_start"          : start_ts,
+        "run_end"            : datetime.now().isoformat(),
+        "total_source_images": len(tasks),
+        "total_feature_rows" : len(success_rows),
+        "n_success"          : n_success,
+        "n_fail"             : n_fail,
+        "n_skip"             : n_skip,
+        "success_rate"       : round(n_success / max(len(tasks) - n_skip, 1) * 100, 2),
         "failures_by_species": _count_by_species(failure_rows),
     }
     with open(dirs["diagnostics"] / f"report_{mode}.json", "w") as jf:
         json.dump(summary, jf, indent=2)
 
-    print(f"\n[{mode.upper()}] Batch complete — {n_success} ok, {n_fail} fail, {n_skip} skipped")
-    print(f"Success rate: {summary['success_rate']:.1f}%")
+    print(f"\n[{mode.upper()}] Batch complete — {n_success} source images ok, "
+          f"{n_fail} fail, {n_skip} skipped")
+    print(f"  Total feature rows: {len(success_rows)}")
+    print(f"  Success rate: {summary['success_rate']:.1f}%")
     return summary
 
 

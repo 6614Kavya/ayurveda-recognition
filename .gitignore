@@ -27,6 +27,7 @@ model_training/module_3/dataset/
 *.pkl
 *.joblib
 *.h5
+model_training/module_3/processed/
 
 # OS
 .DS_Store
