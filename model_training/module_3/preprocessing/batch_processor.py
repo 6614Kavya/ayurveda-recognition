@@ -72,6 +72,7 @@ from preprocessing.shared.masking import qc_check
 from preprocessing.shared.mask_guard import select_mask_guarded
 from preprocessing.shared.augmentation import augment_resized_with_mask_and_original, N_AUGMENTATIONS
 from preprocessing.species_id.pipeline import run_pipeline_from_resized
+from feature_extraction.species_id.colour import REDUNDANT_CLF_COLS as _COLOUR_REDUNDANT_CLF_COLS
 from preprocessing.config import (
     VIEWS, IMG_EXTS, CHECKPOINT_EVERY,
     TARGET_LONG,
@@ -408,11 +409,15 @@ def run_batch(data_root: Path,
     #     colour_bgr_b_* is kept (least correlated of the three BGR
     #     channels — carries the most non-redundant signal). This drops 18
     #     of 146 feature columns.
+    #     Sourced from feature_extraction.species_id.colour.REDUNDANT_CLF_COLS
+    #     (imported above as _COLOUR_REDUNDANT_CLF_COLS) rather than
+    #     hardcoded here a second time — colour.py is the module that knows
+    #     which channels it emits and why they're redundant, so it owns
+    #     this list. Prevents this drop-list going stale if colour.py's
+    #     stat suffixes or redundant-channel set ever change.
     FEATURE_DROP_COLS = [
         "whole_area_cv", "whole_area_max_min_ratio", "whole_spacing_cv",
-    ] + [f"colour_hsv_v_{suf}" for suf in ("median", "iqr", "q25", "q75", "skew", "kurt")] \
-      + [f"colour_bgr_g_{suf}" for suf in ("median", "iqr", "q25", "q75", "skew", "kurt")] \
-      + [f"colour_bgr_r_{suf}" for suf in ("median", "iqr", "q25", "q75", "skew", "kurt")]
+    ] + _COLOUR_REDUNDANT_CLF_COLS
 
     if success_rows:
         df_success = pd.DataFrame(success_rows)

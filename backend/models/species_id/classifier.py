@@ -24,15 +24,7 @@ def make_stage1_pipeline(random_state=42) -> Pipeline:
 
 
 class HierarchicalSpeciesClassifier(BaseEstimator, ClassifierMixin):
-    """
-    Stage 1: flat soft-voting ensemble across all species.
-    Stage 2: when Stage-1's top-2 predictions are close AND both belong to
-             the same auto-discovered confusable cluster, a specialist model
-             trained only on that cluster's species re-decides.
 
-    Clusters are discovered via an inner StratifiedGroupKFold on the
-    training data only (never touches the outer/held-out fold).
-    """
 
     def __init__(self, confusion_threshold=10, margin_threshold=0.12,
                  inner_splits=4, random_state=42):
@@ -117,3 +109,42 @@ class HierarchicalSpeciesClassifier(BaseEstimator, ClassifierMixin):
             specialist = self.stage2_[tuple(cl)]
             final[in_cluster] = specialist.predict(X[in_cluster])
         return final
+
+    
+    def predict_with_confidence(self, X):
+        """
+        Returns
+        -------
+        final      : array of predicted species labels, shape (n_samples,)
+        confidence : array of float probabilities in [0, 1] for the
+                     returned label, shape (n_samples,) — Stage-1's
+                     top-1 probability, or the specialist's probability
+                     for samples re-decided in Stage 2.
+        """
+        proba = self.stage1_.predict_proba(X)
+        s1_classes = self.stage1_.classes_
+        order = np.argsort(-proba, axis=1)
+        top1_idx, top2_idx = order[:, 0], order[:, 1]
+        top1 = s1_classes[top1_idx]
+        top2 = s1_classes[top2_idx]
+        p1 = proba[np.arange(len(X)), top1_idx]
+        p2 = proba[np.arange(len(X)), top2_idx]
+        margin = p1 - p2
+
+        final = top1.copy()
+        confidence = p1.copy()
+        for cl in self.clusters_:
+            clset = set(cl)
+            in_cluster = np.array([
+                (top1[i] in clset and top2[i] in clset and margin[i] < self.margin_threshold)
+                for i in range(len(X))
+            ])
+            if not in_cluster.any():
+                continue
+            specialist = self.stage2_[tuple(cl)]
+            spec_proba = specialist.predict_proba(X[in_cluster])
+            spec_classes = specialist.classes_
+            spec_pred_idx = np.argmax(spec_proba, axis=1)
+            final[in_cluster] = spec_classes[spec_pred_idx]
+            confidence[in_cluster] = spec_proba[np.arange(len(spec_proba)), spec_pred_idx]
+        return final, confidence
