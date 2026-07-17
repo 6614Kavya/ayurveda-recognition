@@ -1,90 +1,3 @@
-"""
-VedaVision — Shape Features  (shadow-robust revision v2 — bug-fix)
-====================================================================
-Whole-leaf geometry from the binary mask.
-All features are dimensionless — a leaf at any zoom gives the same values.
-
-BUG FIXED in v2
----------------
-convexity was computed as  area / hull_area  — which is IDENTICAL to solidity.
-The correct definition of convexity is the PERIMETER RATIO:
-
-    convexity = hull_perimeter / contour_perimeter
-
-A convex shape has hull_perim ≈ contour_perim  → convexity ≈ 1.0.
-A deeply lobed or pinnate outline has many notches  → contour_perim >> hull_perim
-→ convexity < 1.0.
-
-solidity  captures AREA fill (how much of the convex hull is occupied).
-convexity captures BOUNDARY smoothness (how close the outline is to a convex curve).
-They are complementary descriptors and must NOT be the same formula.
-
-Shadow-robustness notes (unchanged)
-------------------------------------
-Shape features operate on the BINARY MASK CONTOUR, not on pixel colour values,
-so they are naturally more robust to shadow contamination than colour or texture
-features.  Shadow pixels at the leaf boundary slightly inflate the contour area
-and perimeter, but because both numerator and denominator grow together in all
-ratios, the ratio values stay nearly constant.
-
-====================================================================
-BOTANICAL / HANDCRAFTED ADDITIONS (this revision)
-====================================================================
-Everything above this point is the STANDARD descriptor set (Hu moments,
-aspect ratio, circularity, etc.) — generic shape math that carries no
-botanical intent. Per supervisor feedback, these are kept only as a
-comparison baseline, NOT the project's novelty contribution.
-
-Everything below is NEW: features explicitly designed around named
-botanical traits from the project's look-alike-pair reference
-(leaf_pair_features.docx), all prefixed `botanical_` so they can be
-isolated from the standard set in any ablation. They target apex shape,
-base symmetry, margin serration, and leaflet packing/spacing — NOT
-leaflet count (several pinnate species in this dataset have fallen
-leaflets, so counts are unreliable; every botanical feature here is a
-median/IQR statistic over detected leaflet-pair "arcs", which stays
-stable even if 1-2 leaflets are missing from a given photo).
-
-Method: sinus/apex analysis along the rachis axis
----------------------------------------------------
-1. Find the rachis axis as the LONGEST PATH in the mask's skeleton graph
-   (not a simple PCA straight line, and not "all skeleton pixels ordered
-   by projection" — that naive approach was tested and found to zigzag
-   through leaflet-tip spurs; the longest-path-in-graph approach reliably
-   isolates just the main stem, since it's longer than any single
-   leaflet's skeleton spur).
-2. At each point along the axis, scan perpendicular to the LEFT and
-   RIGHT separately (not summed into one number) until the mask ends.
-   This gives two boundary traces, left_pts and right_pts, which
-   approximate the leaf's left and right outer margins directly — no
-   separate contour-matching step needed.
-3. APEX = local width maximum on the combined (left+right) profile
-   (a leaflet-pair bulge). SINUS = local width minimum (the waist
-   between one leaflet pair and the next).
-   Peaks/valleys are found by PROMINENCE (continuous score), not a hard
-   concavity threshold — this is what lets the method degrade gracefully
-   instead of failing outright when leaflets are touching (validated on
-   a real touching-leaflet photo: sinus prominence near the touching
-   region measured visibly lower than in the well-separated region,
-   rather than the sinus disappearing outright).
-4. Per-arc statistics (span/height/elongation) are computed between
-   consecutive sinuses, with IQR-based outlier exclusion for arcs that
-   are likely two merged/touching leaflets (abnormally long/short vs the
-   rest of the leaf) — so a missed sinus doesn't quietly corrupt the
-   whole feature, and no leaflet is ever literally counted.
-
-KNOWN LIMITATION (carried over from the masking pipeline's own limit):
-if two leaflets don't just touch but genuinely overlap (one lying partly
-on top of the other), there is no boundary information left in the mask
-for that junction at all — no thresholding recovers it. The mitigations
-here only help the touching-but-not-overlapping case.
-
-STATUS: validated end-to-end on one real photo (runs without crashing,
-axis follows the rachis correctly, sinus prominence behaves as
-predicted). NOT yet validated across the full dataset or against the
-specific look-alike pairs — treat feature values as provisional until
-the pairwise validation step (memory §7a) is run.
-"""
 
 import cv2
 import numpy as np
@@ -93,34 +6,12 @@ from scipy.signal import find_peaks, savgol_filter, peak_widths
 from skimage.morphology import skeletonize
 
 
-# ===========================================================================
-# STANDARD descriptor set (unchanged from previous revision)
-# ===========================================================================
+
+# STANDARD descriptor set 
+
 
 def extract_shape_features(leaf_mask: np.ndarray) -> dict:
-    """
-    Parameters
-    ----------
-    leaf_mask : uint8 binary mask (255 = foreground)
-
-    Returns
-    -------
-    dict with keys:
-        aspect_ratio  — bounding-box width / height
-        circularity   — 4π·area / perimeter²   (1.0 = perfect circle)
-        solidity      — contour area / convex-hull area   (fill ratio)
-        convexity     — hull perimeter / contour perimeter (boundary smoothness)
-        compactness   — contour area / bounding-box area
-        elongation    — minor axis / major axis of fitted ellipse
-        hu_1 … hu_7   — log-normalised Hu moments (from binary mask)
-        botanical_*   — see module docstring; sinus/apex-derived features
-
-    Notes
-    -----
-    solidity  and convexity are now distinct features:
-        solidity  = area / hull_area        (AREA ratio — as before)
-        convexity = hull_perim / perim      (PERIMETER ratio — corrected)
-    """
+   
     cnts, _ = cv2.findContours(leaf_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not cnts:
         return _empty_shape_features()
@@ -196,9 +87,8 @@ def _empty_shape_features() -> dict:
     return feats
 
 
-# ===========================================================================
 # BOTANICAL / HANDCRAFTED additions
-# ===========================================================================
+
 
 _BOTANICAL_SENTINEL = -1.0   # same convention as whole_leaf.py's NaN sentinel
 
@@ -277,19 +167,7 @@ def _get_rachis_axis(mask: np.ndarray, n_samples: int = 300):
 
 
 def _compute_side_profiles(mask: np.ndarray, axis_pts: np.ndarray, half_win=None):
-    """
-    Scan perpendicular to the axis at every sample, LEFT and RIGHT kept
-    separate (not summed) — this is what makes base-offset / asymmetry
-    features possible, versus a single combined width number.
-
-    Returns
-    -------
-    right_w, left_w : 1-D arrays, width of mask on each side (px)
-    right_pts, left_pts : (n, 2) arrays — the actual boundary pixel
-        reached by each scan. These directly approximate the leaf's
-        right/left outer margins, and are reused for apex-curvature and
-        margin-serration features without any separate contour lookup.
-    """
+   
     h, w = mask.shape
     if half_win is None:
         ys, xs = np.nonzero(mask)
@@ -347,13 +225,7 @@ def _smooth(arr: np.ndarray, win_cap: int = 15) -> np.ndarray:
 
 
 def _polyline_curvature(pts: np.ndarray, window: int) -> np.ndarray:
-    """
-    Discrete curvature (signed turning angle, radians) along a polyline,
-    using edge vectors `window` samples apart. Larger window = coarser
-    (apex-scale) curvature; smaller window = finer (margin-serration-scale)
-    curvature. Positive = convex (bulging outward), negative = concave
-    (a notch) using the standard 2-D cross-product sign convention.
-    """
+   
     n = len(pts)
     curv = np.zeros(n)
     for i in range(window, n - window):
@@ -370,25 +242,7 @@ def _polyline_curvature(pts: np.ndarray, window: int) -> np.ndarray:
 
 
 def _peak_sharpness_stats(curv_1d: np.ndarray):
-    """
-    Per-tooth (height, spacing-normalised-width) pairs from a single
-    continuous fine-scale curvature trace (one side of the margin only --
-    do NOT call this on a concatenation of right+left, since find_peaks
-    needs a physically continuous signal and the concatenation seam would
-    register as a spurious peak).
-
-    Added to distinguish tooth SHAPE (rounded/crenate vs pointed/serrate),
-    which botanical_margin_serration_freq/amp cannot do reliably: those
-    two features conflate tooth period, depth, AND shape into two numbers,
-    so a small rounded margin and a larger pointed margin can produce
-    near-identical freq/amp values (confirmed on matched synthetic test
-    curves before adding this feature -- see shape.py revision notes).
-
-    width is normalised by the LOCAL inter-peak spacing (not an absolute
-    pixel width), so a pointed tooth reads as "sharp" whether the leaf's
-    teeth are large or small -- absolute width alone would conflate
-    sharpness with tooth size/zoom level.
-    """
+    
     absc = np.abs(curv_1d)
     if absc.max() < 1e-9:
         return np.array([]), np.array([])
@@ -457,9 +311,7 @@ def _extract_botanical_shape_features(mask: np.ndarray) -> dict:
         feats["botanical_apex_retuse_fraction"] = _BOTANICAL_SENTINEL
 
     # ── Margin serration: fine-scale curvature oscillation ────────────────
-    # Much smaller window than apex_window -- picks up the fine ripple of
-    # tooth-like margins riding on top of the leaflet's own smooth outline,
-    # rather than the leaflet-scale bulges already captured by apex/sinus.
+
     serr_window = max(2, int(0.008 * n_samples))
     right_fine = _polyline_curvature(right_pts, serr_window)
     left_fine = _polyline_curvature(left_pts, serr_window)
@@ -475,12 +327,7 @@ def _extract_botanical_shape_features(mask: np.ndarray) -> dict:
         feats["botanical_margin_serration_amp"] = _BOTANICAL_SENTINEL
 
     # ── Margin tooth sharpness: rounded/crenate vs pointed/serrate ────────
-    # Computed PER SIDE on the un-concatenated right_fine/left_fine traces
-    # (see _peak_sharpness_stats docstring for why), then pooled.
-    # Distinguishes tooth SHAPE, which freq/amp above cannot separate from
-    # tooth period/depth. Targets Beli (finely serrate -- pointed teeth)
-    # vs Kasthuri_Dehi (crenate/scalloped -- rounded teeth), which the
-    # reference doc describes with visually similar small regular waves.
+
     h_r, w_r = _peak_sharpness_stats(right_fine)
     h_l, w_l = _peak_sharpness_stats(left_fine)
     heights_all = np.concatenate([h_r, h_l])
@@ -492,11 +339,7 @@ def _extract_botanical_shape_features(mask: np.ndarray) -> dict:
         feats["botanical_margin_tooth_sharpness"] = _BOTANICAL_SENTINEL
 
     # ── Leaflet-pair offset: base-obliqueness / opposite-vs-alternate proxy
-    # Within each arc (between consecutive sinuses), compare the axis
-    # position of the right-side peak vs the left-side peak. A large
-    # offset means the two leaflets of a "pair" don't attach directly
-    # across from each other (oblique / alternate attachment); near-zero
-    # means a clean opposite pair.
+
     boundaries = np.sort(np.concatenate([[0], sinus_idx, [n_samples - 1]]))
     offsets, elongations = [], []
     for i in range(len(boundaries) - 1):

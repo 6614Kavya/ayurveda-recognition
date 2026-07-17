@@ -89,6 +89,39 @@ _HUE_BINS  = 6          # 6 bins × 30° = full 0–180° OpenCV hue range
 _HUE_RANGE = (0.0, 180.0)
 
 # ---------------------------------------------------------------------------
+# Stat suffixes produced per channel by _robust_stats() — single source of
+# truth so the redundant-column list below can never drift out of sync with
+# the actual column names this module emits.
+# ---------------------------------------------------------------------------
+_STAT_SUFFIXES = ("median", "iqr", "q25", "q75", "skew", "kurt")
+
+# ---------------------------------------------------------------------------
+# Redundant channels — verified >0.97 correlated with colour_lab_l_* on the
+# current training export (up to r=0.999 for hsv_v vs lab_l). HSV-V, LAB-L
+# and BGR-G/R are all measuring the same "how bright is this leaf" signal:
+# these images have a narrow green hue band, so brightness dominates channel
+# variance far more than hue does. LAB-L is kept as the single brightness
+# representative (perceptually decoupled from hue; matches how this module
+# already treats L separately from a/b). colour_bgr_b_* is kept — it is the
+# least correlated of the three BGR channels and carries the most
+# non-redundant signal.
+#
+# These columns are NOT dropped from extract_colour_features()'s output —
+# they stay in the full/diagnostic CSV for QC and correlation audits. They
+# ARE dropped from the classifier-ready CSV. batch_processor.py imports
+# REDUNDANT_CLF_COLS from here rather than hardcoding column names, so this
+# list is the only place that needs updating if the stat suffixes or the
+# redundant-channel decision ever change.
+# ---------------------------------------------------------------------------
+_REDUNDANT_CHANNEL_PREFIXES = ("hsv_v", "bgr_g", "bgr_r")
+
+REDUNDANT_CLF_COLS = [
+    f"colour_{ch}_{suf}"
+    for ch in _REDUNDANT_CHANNEL_PREFIXES
+    for suf in _STAT_SUFFIXES
+]
+
+# ---------------------------------------------------------------------------
 # Botanical feature configuration
 # ---------------------------------------------------------------------------
 # Oil-gland dots are small (a few px across at 512px working resolution).
@@ -116,7 +149,7 @@ def _robust_stats(vals: np.ndarray, prefix: str, out: dict) -> None:
     kurt    — same reasoning as skew
     """
     if len(vals) == 0:
-        for suf in ("median", "iqr", "q25", "q75", "skew", "kurt"):
+        for suf in _STAT_SUFFIXES:
             out[f"{prefix}_{suf}"] = 0.0
         return
 
@@ -269,3 +302,29 @@ def extract_colour_features(img_bgr: np.ndarray,
         feats["botanical_gloss_v_p95_median_ratio"] = _BOTANICAL_SENTINEL
 
     return feats
+
+
+def extract_colour_features_clf(img_bgr: np.ndarray,
+                                  leaf_mask: np.ndarray) -> dict:
+    """
+    Classifier-ready variant of extract_colour_features().
+
+    Same extraction, same numbers — this just drops the columns in
+    REDUNDANT_CLF_COLS (hsv_v / bgr_g / bgr_r stat blocks) before returning,
+    so callers that only care about the model-training feature set don't
+    need to know about the drop-list mechanics.
+
+    Use extract_colour_features() (full dict) when writing the diagnostic
+    / full CSV — you want the redundant channels there for QC and
+    correlation audits. Use this one only when you want the trimmed,
+    classifier-input dict directly (e.g. quick single-image inference,
+    ad-hoc notebook checks).
+
+    batch_processor.py does NOT call this function — it calls
+    extract_colour_features() once per row and drops REDUNDANT_CLF_COLS
+    (plus the other groups' drop columns) at the whole-dataframe level when
+    writing *_clf.csv, so the full CSV and the clf CSV come from a single
+    extraction pass rather than two.
+    """
+    feats = extract_colour_features(img_bgr, leaf_mask)
+    return {k: v for k, v in feats.items() if k not in REDUNDANT_CLF_COLS}
