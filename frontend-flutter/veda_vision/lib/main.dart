@@ -101,9 +101,12 @@ class _HomePageState extends State<HomePage> {
 
   // ── API: upload image to a prediction endpoint ──────────────────
   // endpoint: 'flower' | 'single-leaf' | 'compound-leaf'
-  Future<void> _handleUpload(String endpoint) async {
+  Future<void> _handleUpload(String endpoint, ImageSource source) async {
     final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery);
+    final picked = await picker.pickImage(
+      source: source,
+      imageQuality: 85, // compress a bit — camera photos can be huge
+    );
     if (picked == null) return;
 
     setState(() {
@@ -119,8 +122,6 @@ class _HomePageState extends State<HomePage> {
       );
 
       final bytes = await picked.readAsBytes();
-
-      // Figure out the correct MIME type from the filename extension
       final ext = picked.name.split('.').last.toLowerCase();
       final mimeType = (ext == 'png') ? 'png' : 'jpeg';
 
@@ -129,7 +130,7 @@ class _HomePageState extends State<HomePage> {
           'file',
           bytes,
           filename: picked.name,
-          contentType: MediaType('image', mimeType), // ← the key addition
+          contentType: MediaType('image', mimeType),
         ),
       );
 
@@ -222,19 +223,19 @@ class _HomePageState extends State<HomePage> {
                       _UploadRow(
                         emoji: '🌸',
                         label: 'Flower Image',
-                        onPick: () => _handleUpload('flower'),
+                        onPick: (source) => _handleUpload('flower', source),
                       ),
                       const SizedBox(height: 16),
                       _UploadRow(
                         emoji: '🍃',
                         label: 'Single Leaf Image',
-                        onPick: () => _handleUpload('single-leaf'),
+                        onPick: (source) => _handleUpload('single-leaf', source),
                       ),
                       const SizedBox(height: 16),
                       _UploadRow(
                         emoji: '🌿',
                         label: 'Compound Leaf Image',
-                        onPick: () => _handleUpload('compound-leaf'),
+                        onPick: (source) => _handleUpload('compound-leaf', source),
                       ),
                     ],
                   ),
@@ -358,7 +359,7 @@ class _AppButton extends StatelessWidget {
 class _UploadRow extends StatelessWidget {
   final String emoji;
   final String label;
-  final VoidCallback onPick;
+  final void Function(ImageSource) onPick;
 
   const _UploadRow({
     required this.emoji,
@@ -374,21 +375,31 @@ class _UploadRow extends StatelessWidget {
         border: Border.all(color: AppColors.inputBorder),
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Label text
-          Expanded(
-            child: Text(
-              '$emoji $label',
-              style: const TextStyle(
-                fontWeight: FontWeight.w500,
-                color: AppColors.textPrimary,
-                fontSize: 14,
-              ),
+          Text(
+            '$emoji $label',
+            style: const TextStyle(
+              fontWeight: FontWeight.w500,
+              color: AppColors.textPrimary,
+              fontSize: 14,
             ),
           ),
-          // File picker button
-          _AppButton(label: 'Choose File', onPressed: onPick),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _AppButton(
+                label: '📷 Camera',
+                onPressed: () => onPick(ImageSource.camera),
+              ),
+              const SizedBox(width: 8),
+              _AppButton(
+                label: '🖼 Gallery',
+                onPressed: () => onPick(ImageSource.gallery),
+              ),
+            ],
+          ),
         ],
       ),
     );
