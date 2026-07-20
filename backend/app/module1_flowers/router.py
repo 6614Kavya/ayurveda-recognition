@@ -10,7 +10,7 @@ from app.core.database import get_db
 
 router = APIRouter(prefix="/predict", tags=["Module 1 — Flowers"])
 
-# ── Load models once at startup ───────────────────────────────────────────────
+# Load models once at startup 
 BASE_DIR  = os.path.dirname(os.path.dirname(__file__))   # → backend/app
 MODEL_DIR = os.path.join(BASE_DIR, 'module1_flowers', 'models')
 
@@ -18,9 +18,9 @@ try:
     model   = joblib.load(os.path.join(MODEL_DIR, 'flower_model.joblib'))
     scaler  = joblib.load(os.path.join(MODEL_DIR, 'flower_scaler.joblib'))
     encoder = joblib.load(os.path.join(MODEL_DIR, 'flower_label_encoder.joblib'))
-    print(f'✅ Flower model loaded. Classes: {list(encoder.classes_)}')
+    print(f'Flower model loaded. Classes: {list(encoder.classes_)}')
 except FileNotFoundError as e:
-    print(f'❌ Model file missing: {e}')
+    print(f'Model file missing: {e}')
     model = scaler = encoder = None
 
 
