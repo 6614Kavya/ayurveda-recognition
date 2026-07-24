@@ -1,14 +1,17 @@
-from feature_extraction.species_id.texture import (
+import cv2
+import numpy as np
+
+from app.module2_single_leaves.feature_extraction.species_id.texture import (
     extract_glcm, extract_gabor, extract_lbp, extract_vein_edge_density
 )
 
-from feature_extraction.species_id.shape import (
+from app.module2_single_leaves.feature_extraction.species_id.shape import (
     extract_hog, extract_hu_moments, extract_contour_shape,
     get_leaf_mask_and_contour, extract_notch_features,
     extract_margin_features, extract_principal_axis_features
 )
 
-from feature_extraction.species_id.colour import extract_hsv_color
+from app.module2_single_leaves.feature_extraction.species_id.colour import extract_hsv_color
 
 # ── Master function — extract ALL features ─────────────────
 def extract_all_features(image_bgr):
