@@ -1,4 +1,3 @@
-
 import cv2
 import numpy as np
 from skimage.feature import graycomatrix, graycoprops, local_binary_pattern
