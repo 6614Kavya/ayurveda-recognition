@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:http_parser/http_parser.dart';
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
+import 'package:file_selector/file_selector.dart' as fs;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
@@ -102,12 +105,32 @@ class _HomePageState extends State<HomePage> {
   // ── API: upload image to a prediction endpoint ──────────────────
   // endpoint: 'flower' | 'single-leaf' | 'compound-leaf'
   Future<void> _handleUpload(String endpoint, ImageSource source) async {
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(
-      source: source,
-      imageQuality: 85, // compress a bit — camera photos can be huge
-    );
-    if (picked == null) return;
+    Uint8List bytes;
+    String filename;
+
+    if (_isDesktop && source == ImageSource.gallery) {
+      // Desktop gallery pick: use file_selector directly with a widened
+      // extension filter so HEIC/HEIF show up (image_picker's Windows/Linux/
+      // macOS path hardcodes jpg/jpeg/png/bmp/webp/gif and excludes heic).
+      final typeGroup = fs.XTypeGroup(
+        label: 'images',
+        extensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'heic', 'heif'],
+      );
+      final file = await fs.openFile(acceptedTypeGroups: [typeGroup]);
+      if (file == null) return; // user cancelled
+
+      bytes = await file.readAsBytes();
+      filename = file.name;
+    } else {
+      // Mobile (camera + gallery) and desktop camera: image_picker handles
+      // these fine, including HEIC on iOS/Android.
+      final picker = ImagePicker();
+      final picked = await picker.pickImage(source: source);
+      if (picked == null) return; // user cancelled
+
+      bytes = await picked.readAsBytes();
+      filename = picked.name;
+    }
 
     setState(() {
       _loading = true;
@@ -121,16 +144,12 @@ class _HomePageState extends State<HomePage> {
         Uri.parse('$apiBase/predict/$endpoint'),
       );
 
-      final bytes = await picked.readAsBytes();
-      final ext = picked.name.split('.').last.toLowerCase();
-      final mimeType = (ext == 'png') ? 'png' : 'jpeg';
-
       request.files.add(
         http.MultipartFile.fromBytes(
           'file',
           bytes,
-          filename: picked.name,
-          contentType: MediaType('image', mimeType),
+          filename: filename,
+          contentType: MediaType.parse(_mimeTypeFor(filename)),
         ),
       );
 
@@ -139,9 +158,7 @@ class _HomePageState extends State<HomePage> {
       final body = jsonDecode(res.body);
 
       if (res.statusCode == 200) {
-        setState(() {
-          _prediction = body as Map<String, dynamic>;
-        });
+        setState(() => _prediction = body as Map<String, dynamic>);
       } else {
         setState(() {
           _error =
@@ -150,13 +167,34 @@ class _HomePageState extends State<HomePage> {
         });
       }
     } catch (e) {
-      setState(() {
-        _error = 'Upload failed: $e';
-      });
+      setState(() => _error = 'Upload failed: $e');
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      setState(() => _loading = false);
+    }
+  }
+
+  // Detects desktop platforms (Windows/Linux/macOS) — this is where
+  // image_picker's gallery filter can't be widened, so we route to
+  // file_selector instead. Web and mobile keep using image_picker.
+  bool get _isDesktop =>
+      !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+
+  // Proper extension → MIME type mapping, including HEIC/HEIF
+  String _mimeTypeFor(String filename) {
+    final ext = filename.split('.').last.toLowerCase();
+    switch (ext) {
+      case 'png':
+        return 'image/png';
+      case 'heic':
+        return 'image/heic';
+      case 'heif':
+        return 'image/heif';
+      case 'webp':
+        return 'image/webp';
+      case 'jpg':
+      case 'jpeg':
+      default:
+        return 'image/jpeg';
     }
   }
 
@@ -229,13 +267,15 @@ class _HomePageState extends State<HomePage> {
                       _UploadRow(
                         emoji: '🍃',
                         label: 'Single Leaf Image',
-                        onPick: (source) => _handleUpload('single-leaf', source),
+                        onPick: (source) =>
+                            _handleUpload('single-leaf', source),
                       ),
                       const SizedBox(height: 16),
                       _UploadRow(
                         emoji: '🌿',
                         label: 'Compound Leaf Image',
-                        onPick: (source) => _handleUpload('compound-leaf', source),
+                        onPick: (source) =>
+                            _handleUpload('compound-leaf', source),
                       ),
                     ],
                   ),
