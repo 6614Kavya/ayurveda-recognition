@@ -23,7 +23,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:57517"],  # Flutter port
+    allow_origins=["http://localhost:54888"],  # Flutter port
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
