@@ -75,7 +75,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  static const String apiBase = 'http://localhost:8000';
+  static const String apiBase = 'https://ayurveda-recognition.onrender.com';
 
   Map<String, dynamic>? _health;
   Map<String, dynamic>? _prediction;
