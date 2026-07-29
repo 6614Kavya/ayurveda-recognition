@@ -246,3 +246,106 @@ def augment_resized_with_mask_and_original(img_resized_bgr: np.ndarray,
     return [(img_resized_bgr, mask_final)] + augment_resized_with_mask(
         img_resized_bgr, mask_final, n=n
     )
+# --- append to preprocessing/shared/augmentation.py --------------------------
+
+def _build_transform_geo_only() -> A.Compose:
+    """
+    Health-branch augmentation: geometry ONLY, no photometric transforms.
+
+    Rationale (see project memory): colour_health.py does hard per-pixel
+    LAB/HSV threshold classification (necrotic/chlorotic/pale) and that
+    classification IS the primary training signal for the health branch
+    -- unlike species-ID, where colour features are a demonstrated weak
+    discriminator. HueSaturationValue/BrightnessContrast/RandomShadow can
+    silently nudge a borderline pixel across a threshold and fabricate a
+    false severity shift. Geometric transforms (flip/rotate) cannot alter
+    per-pixel colour classification at all, so they carry zero risk to
+    colour_* features while still multiplying leaf coverage for the small
+    (~15 img/level) health dataset.
+
+    fill_mask=0 on both mask targets: rotation border must resolve to
+    "not leaf" / "not hole-region", never leaf, for both masks.
+
+    NEW: rachis_mask carried through the same warp too (registered as a
+    third additional_targets entry) -- needed so boundary.py/scar.py's
+    rachis-proximity gating stays geometrically correct on augmented rows,
+    not just on the originals.
+    """
+    return A.Compose([
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.5),
+        A.Rotate(
+            limit=30,
+            border_mode=cv2.BORDER_CONSTANT,
+            fill=255,                    # image border -> white background
+            fill_mask=0,                 # ALL mask targets -> background
+            mask_interpolation=cv2.INTER_NEAREST,
+            p=0.7,
+        ),
+    ], additional_targets={"mask_before_holefill": "mask", "rachis_mask": "mask"})
+
+
+_TRANSFORM_GEO_ONLY: A.Compose | None = None
+
+def _get_transform_geo_only() -> A.Compose:
+    global _TRANSFORM_GEO_ONLY
+    if _TRANSFORM_GEO_ONLY is None:
+        _TRANSFORM_GEO_ONLY = _build_transform_geo_only()
+    return _TRANSFORM_GEO_ONLY
+
+
+def augment_health_resized_with_masks(img_resized_bgr: np.ndarray,
+                                       mask_final: np.ndarray,
+                                       mask_before_holefill: np.ndarray,
+                                       rachis_mask: np.ndarray,
+                                       n: int = N_AUGMENTATIONS
+                                       ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Health-branch augmentation. Generates N geometric-only variants,
+    warping img + mask_final + mask_before_holefill + rachis_mask TOGETHER
+    with the identical transform so hole_count/scar_tissue_ratio AND the
+    boundary/scar rachis-gating stay valid on augmented rows (unlike the
+    species-ID path, geometry-only warping doesn't change which pixels are
+    "hole"/"rachis" vs not -- only where they sit -- so carrying all three
+    masks through the same warp is safe, which is NOT true for photometric
+    transforms).
+
+    Parameters
+    ----------
+    img_resized_bgr        : 512x512 BGR, output of letterbox_resize()
+    mask_final              : 512x512 uint8, from select_mask() on the
+                               CLEAN (unaugmented) image
+    mask_before_holefill    : 512x512 uint8, diag["mask_before_holefill"]
+                               from the SAME select_mask() call
+    rachis_mask             : 512x512 uint8, diag["rachis_mask"] from the
+                               SAME select_mask() call
+
+    Returns
+    -------
+    list of (aug_img, aug_mask_final, aug_mask_before_holefill,
+    aug_rachis_mask), length n. Original NOT included -- see
+    *_with_original() below.
+    """
+    transform = _get_transform_geo_only()
+    img_rgb = cv2.cvtColor(img_resized_bgr, cv2.COLOR_BGR2RGB)
+
+    quads = []
+    for _ in range(n):
+        out = transform(
+            image=img_rgb,
+            mask=mask_final,
+            mask_before_holefill=mask_before_holefill,
+            rachis_mask=rachis_mask,
+        )
+        aug_img = cv2.cvtColor(out["image"], cv2.COLOR_RGB2BGR)
+        quads.append((aug_img, out["mask"], out["mask_before_holefill"], out["rachis_mask"]))
+    return quads
+
+
+def augment_health_resized_with_masks_and_original(img_resized_bgr, mask_final,
+                                                     mask_before_holefill, rachis_mask,
+                                                     n: int = N_AUGMENTATIONS):
+    """[(original quad)] + N augmented quads. variants[0] = original."""
+    return [(img_resized_bgr, mask_final, mask_before_holefill, rachis_mask)] + \
+        augment_health_resized_with_masks(img_resized_bgr, mask_final,
+                                           mask_before_holefill, rachis_mask, n=n)
