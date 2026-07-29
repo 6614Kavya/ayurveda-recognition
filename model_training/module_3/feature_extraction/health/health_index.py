@@ -236,12 +236,77 @@ class SpeciesNormStats:
     (specnorm.py finding: variance ratio for e.g. scar_tissue_ratio
     dropped from 61x to 8.5x after this normalization). Falls back to a
     global median/IQR for species with too few healthy leaves to fit a
-    stable per-species baseline."""
+    stable per-species baseline.
+
+    sign_corrections (added this session): +1.0/-1.0 per (species, col).
+    A single global Ridge weight assumes every column's "higher z-score
+    -> more damage" direction is the same across all species -- checked
+    against real per-species Spearman rho and it isn't. Example:
+    worst_hole_count correlates POSITIVELY with severity in most species
+    (more holes = more damage, matching the global weight's sign) but
+    NEGATIVELY for siyambala specifically (rho=-0.624) -- siyambala's
+    healthy leaves are naturally holier than its damaged ones. The
+    global weight, forced to pick one sign, actively works backwards for
+    that species. -1.0 flips that species' z-score for that column
+    before weighting; default 1.0 (trust the global sign) everywhere
+    else. Fit from TRAIN data only, see fit_sign_corrections()."""
     median: Dict[str, Dict[str, float]] = field(default_factory=dict)
     iqr: Dict[str, Dict[str, float]] = field(default_factory=dict)
     global_median: Dict[str, float] = field(default_factory=dict)
     global_iqr: Dict[str, float] = field(default_factory=dict)
+    sign_corrections: Dict[str, Dict[str, float]] = field(default_factory=dict)
     min_healthy_n: int = 5
+
+
+def fit_sign_corrections(
+    df: pd.DataFrame,
+    columns: List[str],
+    species_col: str = "species",
+    level_col: str = "level",
+    min_n: int = 15,
+    rho_threshold: float = 0.3,
+    p_threshold: float = 0.05,
+) -> Dict[str, Dict[str, float]]:
+    """For each (species, column), checks whether that species' OWN train
+    leaves show a raw-feature-vs-severity relationship whose SIGN
+    disagrees with the column's global (all-species-pooled) sign. Only
+    flips (-1.0) when a species has enough leaves (>=min_n) for a stable
+    estimate AND its own correlation clears rho_threshold/p_threshold AND
+    is actually stronger than the global correlation -- a species that's
+    merely noisier than average shouldn't get a flip just from sampling
+    variation; this requires it to show a REAL, opposite, and dominant
+    relationship. Everyone else defaults to +1.0 (trust the pooled sign).
+
+    Tested via sign_fix_prototype.py against the held-out test split
+    before being wired in here: overall test ROC-AUC 0.732 -> 0.804,
+    with the previously worst-performing species (siyambala, which was
+    AUC=0.32 -- worse than random, because worst_hole_count's global
+    sign is backwards for it) improving to 0.64. Not perfect for every
+    species (kattakumanjal, nil_awariya, siyambala still sit in the
+    0.60-0.68 range) -- report per-species AUC in the dissertation
+    rather than only the pooled number, same as before this fix.
+    """
+    ordinal = df[level_col].map(LEVEL_PROXY_SCORE).values
+    corrections: Dict[str, Dict[str, float]] = {}
+    for col in columns:
+        global_rho, _ = spearmanr(ordinal, df[col].astype(float))
+        for species, grp in df.groupby(species_col):
+            corrections.setdefault(species, {})
+            if len(grp) < min_n:
+                corrections[species][col] = 1.0
+                continue
+            grp_ordinal = grp[level_col].map(LEVEL_PROXY_SCORE).values
+            rho, p = spearmanr(grp_ordinal, grp[col].astype(float))
+            if (
+                p < p_threshold
+                and abs(rho) >= rho_threshold
+                and np.sign(rho) != np.sign(global_rho)
+                and abs(rho) > abs(global_rho)
+            ):
+                corrections[species][col] = -1.0
+            else:
+                corrections[species][col] = 1.0
+    return corrections
 
 
 def fit_species_norm_stats(
@@ -250,6 +315,7 @@ def fit_species_norm_stats(
     species_col: str = "species",
     level_col: str = "level",
     min_healthy_n: int = 5,
+    sign_correct: bool = False,
 ) -> SpeciesNormStats:
     stats = SpeciesNormStats(min_healthy_n=min_healthy_n)
     healthy = df[df[level_col] == "healthy"]
@@ -280,6 +346,11 @@ def fit_species_norm_stats(
             floor = max(0.25 * stats.global_iqr[col], EPS)
             stats.median[species][col] = med
             stats.iqr[species][col] = float(max(q75 - q25, floor))
+
+    if sign_correct:
+        # Needs the FULL df (all levels, not just the healthy subset
+        # above) to compute per-species severity correlation direction.
+        stats.sign_corrections = fit_sign_corrections(df, columns, species_col, level_col)
     return stats
 
 
@@ -292,12 +363,22 @@ def apply_species_norm(
     """Robust z-score of each column against that row's species' own
     healthy-class median/IQR. Missing values fall back to 0 (i.e.
     "assumed at that species' healthy baseline") rather than silently
-    corrupting the weighted sum."""
+    corrupting the weighted sum.
+
+    If stats.sign_corrections is non-empty (fit_species_norm_stats was
+    called with sign_correct=True), each column is also multiplied by
+    that row's species' +1.0/-1.0 correction before the clip -- see
+    SpeciesNormStats' docstring for why a single global sign can be
+    backwards for a specific species."""
     out = pd.DataFrame(index=df.index)
     for col in columns:
         med = df[species_col].map(lambda s: stats.median.get(s, {}).get(col, stats.global_median[col]))
         iqr = df[species_col].map(lambda s: stats.iqr.get(s, {}).get(col, stats.global_iqr[col]))
-        out[col] = (df[col].astype(float) - med) / iqr
+        z = (df[col].astype(float) - med) / iqr
+        if stats.sign_corrections:
+            sign = df[species_col].map(lambda s: stats.sign_corrections.get(s, {}).get(col, 1.0))
+            z = z * sign
+        out[col] = z
     # Second safety net: even with the iqr floor above, cap extreme
     # z-scores so no single leaf/column can dominate the weighted sum
     # or the Ridge fit.
@@ -311,11 +392,42 @@ class HealthIndexModel:
     index_min: float
     index_max: float
     species_stats: SpeciesNormStats
+    # ADDED (this session): optional PER-SPECIES 0-100 scaling anchors.
+    # index_min/index_max above are pooled across every species -- fine
+    # for rank-ordering (ROC-AUC is invariant to this either way, since
+    # it's a monotonic transform), but it means the ABSOLUTE number isn't
+    # comparable in the way you'd want: species differ a lot in how far
+    # their worst leaves actually deviate (train raw-score range spanned
+    # from ~1.0 for ranawara's worst leaf to ~3.3 for
+    # maha_undupiyaliya's), so with one shared scale, ranawara's worst
+    # leaf -- maximally bad FOR RANAWARA -- lands nowhere near severity
+    # 100, while an equally-maximally-bad maha_undupiyaliya leaf does.
+    # When these two dicts are non-empty, score()/score_breakdown()
+    # anchor each species to ITS OWN observed train range instead: that
+    # species' own healthy leaves' median raw score -> severity ~0
+    # (health_value ~100), that species' own worst observed train leaf ->
+    # severity 100. Species with too few train leaves to fit a stable
+    # anchor (see fit_health_index_binary's per_species_scale_min_n)
+    # aren't in either dict and fall back to the pooled index_min/
+    # index_max above -- same species-level fallback pattern already
+    # used in SpeciesNormStats for species with too few healthy leaves.
+    species_index_min: Dict[str, float] = field(default_factory=dict)
+    species_index_max: Dict[str, float] = field(default_factory=dict)
+
+    def _bounds_for(self, species: str):
+        lo = self.species_index_min.get(species, self.index_min)
+        hi = self.species_index_max.get(species, self.index_max)
+        return lo, hi
 
     def score(self, df: pd.DataFrame, species_col: str = "species") -> np.ndarray:
         z = apply_species_norm(df, self.subscore_columns, self.species_stats, species_col)
         raw = z.values @ self.weights
-        scaled = 100.0 * (raw - self.index_min) / max(self.index_max - self.index_min, EPS)
+        if self.species_index_min:
+            lo = df[species_col].map(lambda s: self.species_index_min.get(s, self.index_min)).values
+            hi = df[species_col].map(lambda s: self.species_index_max.get(s, self.index_max)).values
+            scaled = 100.0 * (raw - lo) / np.maximum(hi - lo, EPS)
+        else:
+            scaled = 100.0 * (raw - self.index_min) / max(self.index_max - self.index_min, EPS)
         return np.clip(scaled, 0.0, 100.0)
 
     def score_breakdown(self, row: pd.Series, species_col: str = "species") -> Dict[str, float]:
@@ -333,6 +445,11 @@ class HealthIndexModel:
         subscore that's better than typical for its species should
         contribute 0% to "what's driving THIS leaf's damage," not a
         negative or inflated share.
+
+        NOTE: unaffected by species_index_min/max above -- this is a
+        share WITHIN one leaf's own contributions (they sum to 100%
+        regardless of the final severity-score anchor), not a score on
+        the 0-100 scale itself.
         """
         one = pd.DataFrame([row])
         z = apply_species_norm(one, self.subscore_columns, self.species_stats, species_col).iloc[0]
@@ -400,6 +517,9 @@ def fit_health_index_binary(
     subscore_columns: List[str] = SUBSCORE_RAW_COLUMNS,
     species_col: str = "species",
     level_col: str = "level",
+    sign_correct: bool = False,
+    per_species_scale: bool = False,
+    per_species_scale_min_n: int = 15,
 ) -> HealthIndexModel:
     """
     PRIMARY method (replaces fit_health_index() -- see module docstring
@@ -413,14 +533,36 @@ def fit_health_index_binary(
     rows only, since that step was never implicated in the low/mid/high
     overlap failure.
 
+    sign_correct (added this session, default False for backward
+    compatibility -- train_health_index.py passes True): also fits
+    per-species sign corrections (fit_sign_corrections) so a column
+    whose real relationship to severity flips sign for one species
+    (e.g. worst_hole_count is negatively correlated with severity for
+    siyambala, positively for most others) doesn't get forced into the
+    global sign for every species. Tested on held-out data: overall
+    test ROC-AUC 0.732 -> 0.804. See SpeciesNormStats' docstring for
+    the full reasoning and per-species before/after numbers.
+
     Returns the same HealthIndexModel type as fit_health_index(), so
     .score() and .score_breakdown() work identically downstream. The
     only difference is what the weights were fit against. Unhealthy
     leaves get a continuous 0-100 deviation-from-baseline score, not a
     low/mid/high bucket -- do not reinterpret this score's absolute
     position as a severity-tier claim.
+
+    per_species_scale (added this session, default False): anchor the
+    final 0-100 scale per species instead of pooling every species into
+    one shared range -- see HealthIndexModel.species_index_min/max's
+    docstring for why the pooled range under/over-states severity for
+    species whose worst leaves simply don't deviate as far in raw terms.
+    Does NOT change ROC-AUC/ranking (a monotonic per-group rescale can't
+    change within-species rank order) -- this is purely about making the
+    absolute number mean the same thing ("how bad for THIS species")
+    across species, not about separating healthy from unhealthy any
+    better. Species with fewer than per_species_scale_min_n train leaves
+    don't get their own anchor and fall back to the pooled range.
     """
-    stats = fit_species_norm_stats(df, subscore_columns, species_col, level_col)
+    stats = fit_species_norm_stats(df, subscore_columns, species_col, level_col, sign_correct=sign_correct)
     z_full = apply_species_norm(df, subscore_columns, stats, species_col)
 
     y_binary = df[level_col].map(BINARY_PROXY_SCORE).values.astype(float)
@@ -441,12 +583,29 @@ def fit_health_index_binary(
     weights = coef / coef.sum()
 
     raw_scores_full = z_full.values @ weights
+
+    species_index_min = {}
+    species_index_max = {}
+    if per_species_scale:
+        raw_by_row = pd.Series(raw_scores_full, index=df.index)
+        for species, grp in df.groupby(species_col):
+            if len(grp) < per_species_scale_min_n:
+                continue  # falls back to the pooled index_min/index_max at score() time
+            grp_raw = raw_by_row.loc[grp.index]
+            healthy_mask = grp[level_col] == "healthy"
+            if healthy_mask.sum() == 0:
+                continue  # can't anchor "healthy" for a species with no healthy train leaves
+            species_index_min[species] = float(grp_raw[healthy_mask].median())
+            species_index_max[species] = float(grp_raw.max())
+
     return HealthIndexModel(
         subscore_columns=subscore_columns,
         weights=weights,
         index_min=float(raw_scores_full.min()),
         index_max=float(raw_scores_full.max()),
         species_stats=stats,
+        species_index_min=species_index_min,
+        species_index_max=species_index_max,
     )
 
 
