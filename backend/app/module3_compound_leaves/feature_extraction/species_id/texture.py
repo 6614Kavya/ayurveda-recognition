@@ -1,12 +1,41 @@
+"""
+VedaVision — Texture Features  (shadow-robust revision)
+========================================================
+GLCM + LBP texture descriptors extracted from the ENHANCED (sharpened) image.
+
+Shadow-robustness changes vs previous version
+---------------------------------------------
+GLCM:
+  OLD — bounding-box crop only; background/shadow pixels set to 0
+        → zero creates a massive artificial contrast edge in the GLCM
+  NEW — excluded pixels (outside mask OR suspiciously dark) filled with
+        the MEDIAN foreground value instead of zero.
+        Median fill is co-occurrence-neutral: a pixel surrounded by
+        median-valued neighbours contributes nothing unusual to any GLCM
+        property.  Shadow pixels that sneak past the mask are treated the
+        same way: they are clamped toward the median before GLCM runs.
+
+  ADDED: confident_mask — pixels with V < 40 inside the foreground are
+         flagged as probable shadow contamination and median-filled rather
+         than included in the GLCM.  This threshold is conservative
+         (V < 40 means very dark, not just shaded).
+
+LBP:
+  UNCHANGED — LBP compares each pixel to its neighbours RELATIVELY.
+  A shadow pixel surrounded by other shadow pixels produces the same
+  LBP code as a bright pixel in a bright region.  LBP is inherently
+  illumination-invariant and needs no shadow-specific modification.
+  Histogram is still computed on foreground pixels only (px_mask gate).
+"""
 
 import cv2
 import numpy as np
 from skimage.feature import local_binary_pattern, graycomatrix, graycoprops
 from app.module3_compound_leaves.preprocessing.config import LBP_RADIUS, LBP_POINTS, GLCM_DIST, GLCM_ANGLES
 
-
+# ---------------------------------------------------------------------------
 # Shadow-confidence threshold
-
+# ---------------------------------------------------------------------------
 _SHADOW_V_THRESH = 40   # HSV Value below this inside the mask → probable shadow
                         # Conservative: real deep-green leaves have V ≈ 60-100
 
@@ -15,7 +44,23 @@ _BOTANICAL_SENTINEL = -1.0
 
 def _extract_botanical_texture_features(img_sharp_bgr: np.ndarray,
                                          confident_mask: np.ndarray) -> dict:
-    
+    """
+    BOTANICAL / HANDCRAFTED addition, prefixed `botanical_`.
+    A single backup cross-check feature, deliberately minimal — the
+    primary signals for the traits this could address (glossiness,
+    reticulation density) already live in colour.py and vein.py; this is
+    a secondary confirmation, not a new primary signal, so scope is kept
+    small here rather than duplicating machinery.
+
+    botanical_local_contrast_variance — spatial variance of local
+    micro-contrast (std of L in small windows) across the leaf. Glossy
+    surfaces (Kattakumanjal) show patchy local contrast from specular
+    highlights; matte surfaces (Kalawal) and leaves with a fine, uniform
+    reticulate network (Siyabala) show more spatially uniform local
+    contrast. Backs up botanical_gloss_* in colour.py.
+
+    STATUS: not yet visually validated on real photos.
+    """
     if confident_mask.sum() < 200:
         return {"botanical_local_contrast_variance": _BOTANICAL_SENTINEL}
     try:
@@ -33,12 +78,31 @@ def _extract_botanical_texture_features(img_sharp_bgr: np.ndarray,
         return {"botanical_local_contrast_variance": _BOTANICAL_SENTINEL}
 
 
-
+# ---------------------------------------------------------------------------
 # Public API
+# ---------------------------------------------------------------------------
 
 def extract_texture_features(img_sharp_bgr: np.ndarray,
                               leaf_mask: np.ndarray) -> dict:
-    
+    """
+    Parameters
+    ----------
+    img_sharp_bgr : enhanced BGR uint8 image (output of enhance.py)
+    leaf_mask     : uint8 binary mask (255 = foreground)
+
+    Returns
+    -------
+    dict — 8 GLCM stats (4 props × mean+std, rotation-invariant)
+           + (LBP_POINTS+2) histogram bins + lbp_mean + lbp_std
+           = same dimensionality as previous version
+
+    Shadow robustness
+    -----------------
+    Excluded pixels (background OR dark shadow) are filled with the median
+    foreground grey value BEFORE GLCM.  This neutralises artificial contrast
+    edges that zero-fill would create at the shadow/leaf boundary.
+    LBP is illumination-invariant by design — no change needed.
+    """
     gray    = cv2.cvtColor(img_sharp_bgr, cv2.COLOR_BGR2GRAY)
     px_mask = leaf_mask > 0
     if px_mask.sum() < 50:
