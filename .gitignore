@@ -1,5 +1,6 @@
 # Python
 backend/venv/
+.venv/
 model_training/module_3/venv/
 backend/__pycache__/
 backend/*.pyc
@@ -31,5 +32,3 @@ model_training/module_3/processed/
 .DS_Store
 Thumbs.db
 
-# Notebooks  
-model_training/module_2/notebooks/
