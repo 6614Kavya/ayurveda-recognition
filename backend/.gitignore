@@ -4,3 +4,6 @@ __pycache__/
 .env
 *.h5
 .DS_Store
+
+# Notebooks  
+model_training/module_2/notebooks/
