@@ -3,16 +3,6 @@ import numpy as np
 from skimage.feature import hog
 
 def extract_hog(gray_img):
-    """
-    Histogram of Oriented Gradients (HOG).
-    Captures DIRECTION of edges across the image.
-    Why for leaves:
-    → Long narrow leaf: edges run vertically → high vertical HOG
-    → Round leaf: edges curve in all directions → spread HOG
-    → Gotukola fan shape: distinct HOG pattern
-    → Most powerful for distinguishing different leaf SHAPES
-    Returns 5 summary values: mean, std, max, min, sum
-    """
     hog_feats, _ = hog(
         gray_img,
         orientations=9,
@@ -33,13 +23,6 @@ def extract_hog(gray_img):
 def extract_hu_moments(gray_img):
     """
     Hu-Moments — 7 rotation/scale invariant shape descriptors.
-    Captures OVERALL SHAPE of the leaf as numbers.
-    Why for leaves:
-    → Long narrow leaf → high Hu values (elongated)
-    → Round leaf → low Hu values (circular)
-    → Gotukola fan → medium unique Hu pattern
-    Log-transformed for numerical stability.
-    Returns 7 values.
     """
     moments    = cv2.moments(gray_img)
     hu         = cv2.HuMoments(moments).flatten()
@@ -48,18 +31,6 @@ def extract_hu_moments(gray_img):
 
 
 def extract_contour_shape(gray_img):
-    """
-    Geometric shape features from leaf contour.
-    Why for leaves:
-    → Aspect ratio: long narrow (high) vs round (near 1.0)
-    → Circularity: how circular is the leaf
-    → Solidity: how solid/compact vs lobed/notched
-    → Most useful for separating morphologically similar species
-       that differ mainly in shape ratios ✅
-    Returns 7 values:
-    area, perimeter, aspect_ratio, extent,
-    solidity, circularity, equiv_diameter
-    """
     _, thresh = cv2.threshold(
         gray_img, 0, 255,
         cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)

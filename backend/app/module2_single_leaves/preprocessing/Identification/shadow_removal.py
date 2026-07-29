@@ -2,12 +2,6 @@ import cv2
 import numpy as np
 
 def correct_leaf_shadow(image, leaf_mask, blur_ksize=61, max_gain=2.2):
-    """
-    Illumination correction (flat-fielding) for shadow ON the leaf
-    surface -- NOT inpainting. Estimates a smooth lighting map via
-    heavy Gaussian blur of the L channel and divides it out, rescaling
-    real pixels rather than fabricating new ones.
-    """
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l = lab[:, :, 0].astype(np.float32)
     a = lab[:, :, 1].astype(np.float32)

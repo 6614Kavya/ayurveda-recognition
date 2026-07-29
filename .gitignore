@@ -30,3 +30,6 @@ model_training/module_3/processed/
 # OS
 .DS_Store
 Thumbs.db
+
+# Notebooks  
+model_training/module_2/notebooks/

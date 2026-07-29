@@ -2,16 +2,6 @@ import cv2
 import numpy as np
 
 def get_border_connected_background(candidate_bg, bridge_break_px=7):
-    """
-    Flood-fills candidate_bg in from the image border to find TRUE
-    background, with a bridge-break step first: eroding candidate_bg
-    by bridge_break_px before flood-filling breaks any thin (1-2px)
-    hairline connection between real background and a pale patch deep
-    inside the leaf, so the fill can't "leak" through it. The result is
-    dilated back out and intersected with the original candidate mask,
-    so true background extent is preserved -- only the leaked tendrils
-    into the leaf are cut off.
-    """
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (bridge_break_px, bridge_break_px))
     eroded_bg = cv2.erode(candidate_bg, kernel)
 
@@ -37,18 +27,6 @@ def remove_small_blobs(mask, min_area=100):
 
 
 def keep_largest_contours(mask, keep_ratio=0.05, min_absolute_area=1500):
-    """
-    Keeps the largest leaf contour, plus:
-      - anything at least keep_ratio of its size (relative), OR
-      - anything at least min_absolute_area pixels (absolute floor)
-    A pure relative ratio (the old 0.3) can delete a real, legitimately
-    separated piece of leaf (e.g. one cut off by a strong glare/shadow
-    region reaching the edge) just for being smaller than 30% of the
-    main lobe -- which is what produced the clean "missing bite" you're
-    seeing on some leaves. The absolute floor protects real leaf area
-    regardless of how big the main lobe happens to be, while still
-    dropping genuinely tiny debris/specks.
-    """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return mask
@@ -69,19 +47,6 @@ def segment_leaf(image,
                  morph_kernel_size=3,
                  min_blob_area=100,
                  otsu_relax_factor=0.8):
-    """
-    Full segmentation:
-    Saturation threshold -> bridge-break fill-holes
-    -> component-level dark/bright classification
-    -> small-blob cleanup
-    -> morphological close/open
-    -> keep largest contour(s).
-
-    Returns a binary mask:
-    255 = leaf
-    0 = background/shadow.
-    """
-
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     s = hsv[:, :, 1]
@@ -98,11 +63,6 @@ def segment_leaf(image,
         cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    # Relax the threshold for pale / low-saturation leaves.
-    # Example:
-    # Otsu threshold = 50
-    # Relax factor = 0.6
-    # New threshold = 30
     relaxed_thresh = otsu_thresh * otsu_relax_factor
 
     _, candidate_leaf = cv2.threshold(
@@ -114,19 +74,15 @@ def segment_leaf(image,
 
     candidate_bg = cv2.bitwise_not(candidate_leaf)
 
-    # --------------------------------------------------
-    # 2. Find border-connected background
-    # --------------------------------------------------
-
+   
+    # 2. Find border-connected background 
     border_bg = get_border_connected_background(
         candidate_bg,
         bridge_break_px
     )
 
-    # --------------------------------------------------
+    
     # 3. Analyze enclosed low-saturation regions
-    # --------------------------------------------------
-
     enclosed = cv2.bitwise_and(
         candidate_bg,
         cv2.bitwise_not(border_bg)
@@ -162,10 +118,8 @@ def segment_leaf(image,
             # Bright/pale enclosed region = protect as leaf
             undecided.append(label)
 
-    # --------------------------------------------------
+    
     # 4. Adjacency promotion for small shadow artifacts
-    # --------------------------------------------------
-
     kernel_adj = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
         (11, 11)
@@ -189,10 +143,8 @@ def segment_leaf(image,
         ):
             dark_enclosed[comp] = 255
 
-    # --------------------------------------------------
+    
     # 5. Combine background regions
-    # --------------------------------------------------
-
     background_mask = cv2.bitwise_or(
         border_bg,
         dark_enclosed
@@ -200,19 +152,15 @@ def segment_leaf(image,
 
     leaf_mask = cv2.bitwise_not(background_mask)
 
-    # --------------------------------------------------
+   
     # 6. Remove small leaf blobs
-    # --------------------------------------------------
-
     leaf_mask = remove_small_blobs(
         leaf_mask,
         min_area=min_blob_area
     )
 
-    # --------------------------------------------------
+   
     # 7. Morphological cleanup
-    # --------------------------------------------------
-
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
         (
@@ -235,10 +183,8 @@ def segment_leaf(image,
         iterations=1
     )
 
-    # --------------------------------------------------
+    
     # 8. Keep main leaf contour(s)
-    # --------------------------------------------------
-
     leaf_mask = keep_largest_contours(
         leaf_mask
     )
@@ -246,13 +192,6 @@ def segment_leaf(image,
     return leaf_mask
 
 def crop_to_leaf_bbox(image, mask, padding_frac=0.10):
-    """
-    Crops both image and mask to the leaf's bounding box. Removes any
-    camera-distance artifact -- a real user can't choose their photo
-    distance based on species (they don't know it yet), so leaf size
-    determined purely by camera distance cannot be a trustworthy
-    training signal.
-    """
     coords = cv2.findNonZero(mask)
     if coords is None:
         return image, mask
@@ -269,7 +208,6 @@ def remove_background(image, mask):
     return result
 
 def resize_with_padding(image, target_size, pad_value=255):
-    """Resize preserving aspect ratio, pad the rest with white."""
     h, w = image.shape[:2]
     target_w, target_h = target_size
 
