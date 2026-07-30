@@ -2,11 +2,11 @@ import json
 import joblib
 import os
 import warnings
+from pathlib import Path
 
  
-# Resolve absolute path to the directory containing this script
-MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
-HEALTH_MODEL_DIR = os.path.join(MODEL_DIR, "models", "health")
+MODEL_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+HEALTH_MODEL_DIR = MODEL_DIR / "models" / "health"
 class PredictionError(Exception):
     """Custom exception for model loading or inference errors."""
     pass
@@ -41,9 +41,10 @@ def get_artifacts():
     """Loads and caches species classification artifacts."""
     global _pipeline, _label_encoder, _feature_columns
     if _pipeline is None:
-        species_pipe_path = MODEL_DIR / "species_classifier_pipeline.pkl"
-        encoder_path = MODEL_DIR / "label_encoder.pkl"
-        cols_path = MODEL_DIR / "feature_columns.pkl"
+        SPECIES_MODEL_DIR = MODEL_DIR / "models" 
+        species_pipe_path = SPECIES_MODEL_DIR / "species_classifier_pipeline.pkl"
+        encoder_path = SPECIES_MODEL_DIR / "label_encoder.pkl"
+        cols_path = SPECIES_MODEL_DIR / "feature_columns.pkl"
 
         # Verify species files exist
         for path in [species_pipe_path, encoder_path, cols_path]:
@@ -74,6 +75,7 @@ def get_health_artifacts():
 
     try:
         artifacts["stage1_pipeline"] = joblib.load(stage1_pipeline_path)
+        _patch_scikit_learn_compat(artifacts["stage1_pipeline"])
         artifacts["stage1_columns"] = joblib.load(stage1_columns_path)
 
         if os.path.exists(stage1_encoder_path):
@@ -94,12 +96,13 @@ def get_health_artifacts():
         raise PredictionError(f"Error loading Health Stage 1 artifacts: {str(e)}")
 
     # Stage 2: Health Index SVR Regressor
-    stage2_pipeline_path = os.path.join(MODEL_DIR, "stage2_health_index_regressor_pipeline.pkl")
-    stage2_columns_path = os.path.join(MODEL_DIR, "stage2_health_index_feature_columns.pkl")
+    stage2_pipeline_path = HEALTH_MODEL_DIR / "stage2_health_index_regressor_pipeline.pkl"
+    stage2_columns_path = HEALTH_MODEL_DIR / "stage2_health_index_feature_columns.pkl"
 
     if os.path.exists(stage2_pipeline_path) and os.path.exists(stage2_columns_path):
         try:
             artifacts["stage2_pipeline"] = joblib.load(stage2_pipeline_path)
+            _patch_scikit_learn_compat(artifacts["stage2_pipeline"])
             artifacts["stage2_columns"] = joblib.load(stage2_columns_path)
         except Exception as e:
             print(f"Warning: Could not load Stage 2 artifacts ({e}).")
