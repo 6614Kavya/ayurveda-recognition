@@ -1,0 +1,17 @@
+{
+  "stage": "stage2_health_index",
+  "selected_model": "SVR (RBF)",
+  "selection_rule": "highest tuned CV R\u00b2 before test evaluation",
+  "test_metrics": {
+    "r2": 0.7735385835235924,
+    "mae": 0.17732040023376772,
+    "rmse": 0.23793981196744254,
+    "threshold_accuracy": 0.9428571428571428,
+    "auc": 0.9893877551020408,
+    "cliffs_delta": 0.9787755102040816,
+    "cliffs_delta_label": "large",
+    "mannwhitney_p_value": 1.979658160351843e-12
+  },
+  "feature_weight_method": "Permutation importance (unsigned magnitude only)",
+  "note": "Target is binary ground truth (healthy=0/damaged=1) regressed continuously -- see notebook markdown for what this can and cannot validly claim."
+}
