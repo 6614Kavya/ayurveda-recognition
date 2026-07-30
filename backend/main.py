@@ -9,6 +9,7 @@ from app.module2_single_leaves.router import router as m2_router
 from app.module3_compound_leaves.router import router as m3_router
 from app.module3_compound_leaves.router_health import router as m3_health_router
 from app.leaf_router.router import router as leaf_router
+from app.leaf_router.router_health import router as leaf_health_router
 
 
 @asynccontextmanager
@@ -38,6 +39,7 @@ app.include_router(m2_router)
 app.include_router(m3_router)
 app.include_router(m3_health_router)
 app.include_router(leaf_router)
+app.include_router(leaf_health_router)
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
