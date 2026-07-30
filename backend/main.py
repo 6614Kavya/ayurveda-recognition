@@ -7,6 +7,8 @@ from app.shared.schemas import HealthResponse
 from app.module1_flowers.router import router as m1_router
 from app.module2_single_leaves.router import router as m2_router
 from app.module3_compound_leaves.router import router as m3_router
+from app.module3_compound_leaves.router_health import router as m3_health_router
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,6 +35,7 @@ app.add_middleware(
 app.include_router(m1_router)
 app.include_router(m2_router)
 app.include_router(m3_router)
+app.include_router(m3_health_router)
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():

@@ -152,13 +152,19 @@ def _notches(contour, rachis_dilated=None, min_depth_px=3.0):
     hull_indices = np.sort(hull_indices, axis=0)
     try:
         defects = cv2.convexityDefects(contour, hull_indices)
+        if defects is None:
+            return 0, 0.0
     except cv2.error:
         return 0, SENTINEL
     if defects is None:
         return 0, SENTINEL
 
-    depths = defects[:, 0, 3] / 256.0  # fixed-point -> pixels
-    far_idxs = defects[:, 0, 2]
+    if defects.ndim == 3:
+        depths = defects[:, 0, 3] / 256.0
+        far_idxs = defects[:, 0, 2]
+    else:
+        depths = defects[:, 3] / 256.0
+        far_idxs = defects[:, 2]
 
     kept_depths = []
     for depth, far_idx in zip(depths, far_idxs):
