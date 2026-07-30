@@ -6,7 +6,11 @@ from app.module3_compound_leaves.preprocessing.config import GLCM_DIST, GLCM_ANG
 
 _BOTANICAL_SENTINEL = -1.0
 
-
+# Keys added in this revision (targeting the Kasthuri_Dehi/Thunpath_Kurundu
+# and Beli/Wal_Kollu pairs, which the original 2-feature botanical vein set
+# did not cover -- see module docstring on each helper below). Kept as a
+# single list so every early-return path in extract_vein_features() can
+# stay schema-consistent without repeating five sentinel lines each time.
 _NEW_BOTANICAL_VEIN_KEYS = [
     "botanical_vein_base_branch_angle",
     "botanical_vein_base_branch_count",
@@ -20,6 +24,11 @@ def _empty_new_botanical_vein_features() -> dict:
     return {k: _BOTANICAL_SENTINEL for k in _NEW_BOTANICAL_VEIN_KEYS}
 
 
+# ===========================================================================
+# Skeleton-graph helpers (same longest-path-in-graph pattern as shape.py's
+# rachis-axis extraction, kept independent/duplicated here per vein.py's
+# existing convention of not importing across feature_extraction modules)
+# ===========================================================================
 
 def _skeleton_to_graph(skel: np.ndarray):
     """8-connected pixel graph of a binary skeleton. None if too sparse."""
@@ -41,7 +50,13 @@ def _skeleton_to_graph(skel: np.ndarray):
 
 
 def _largest_component_and_longest_path(G):
-    """Largest connected component of a graph, and its longest path (as node list)."""
+    """
+    Restrict to the largest connected skeleton fragment (vein skeletons are
+    often split into several disconnected pieces, unlike shape.py's mask
+    skeleton which is one connected blob), then find the longest path in
+    it via the standard double-Dijkstra tree-diameter trick. Returns
+    (G_largest, path) or (None, None).
+    """
     if G is None or G.number_of_nodes() < 10:
         return None, None
     if not nx.is_connected(G):
@@ -205,7 +220,45 @@ def _extract_botanical_vein_features(gray_work: np.ndarray, gray_eq: np.ndarray,
                                       vein_skel_work: np.ndarray,
                                       vein_binary_work: np.ndarray,
                                       mask_work: np.ndarray) -> dict:
+    """
    
+
+    botanical_vein_spacing_period — distance (px, at WORK_SIZE) between
+        adjacent parallel secondary veins. Targets Kathurupila (closely
+        spaced, "comb-like ribbed" veins) vs Nil_Awariya (widely spaced,
+        faint venation). Computed by projecting vein-skeleton pixels onto
+        the axis PERPENDICULAR to the leaf's principal axis (found via a
+        lightweight local PCA on mask_work -- not the same graph-based
+        rachis axis used in shape.py, kept independent to avoid an
+        import dependency between feature_extraction modules) and taking
+        the first non-zero-lag peak of the autocorrelation of that
+        1-D projection profile.
+
+    botanical_vein_prominence_contrast — how strongly veins stand out
+        from the surrounding blade tone. Targets Kathurupila (strongly
+        raised, closely ribbed) vs Nil_Awariya (faint, barely raised),
+        and Kalawal (fine visible venation) vs Kattakumanjal (glossy
+        surface muting venation visibility). Computed as the mean
+        absolute difference between the equalised grayscale at vein
+        pixels and a heavily blurred ("local blade tone") version of the
+        same image at those pixels, normalised by the blade's own tonal
+        spread so the feature stays comparable across images of
+        different overall contrast.
+
+    botanical_vein_base_branch_angle / _count, botanical_vein_angle_median,
+    botanical_vein_loop_fraction, botanical_tertiary_reticulation_density
+    — added this revision, see their own helper functions above for full
+    rationale. Added specifically because the original two features above
+    target Kathurupila/Nil_Awariya and Kalawal/Kattakumanjal, leaving
+    Kasthuri_Dehi/Thunpath_Kurundu (venation architecture) and
+    Beli/Wal_Kollu (vein angle, looping, tertiary reticulation) with no
+    dedicated handcrafted vein feature at all.
+
+    STATUS: not yet visually validated against real Kathurupila /
+    Nil_Awariya, Kalawal / Kattakumanjal, Kasthuri_Dehi / Thunpath_Kurundu,
+    or Beli / Wal_Kollu photos. Same "provisional until pairwise
+    validation" convention as shape.py's botanical additions.
+    """
     feats = {}
     vein_px = vein_skel_work > 0
     mask_px = mask_work > 0
@@ -285,16 +338,28 @@ def _extract_botanical_vein_features(gray_work: np.ndarray, gray_eq: np.ndarray,
 
     return feats
 
-
+# ---------------------------------------------------------------------------
 # Constants
+# ---------------------------------------------------------------------------
 
+# All vein processing is done at this resolution (longest side).
+# Keeps kernel sizes, CLAHE tiles and adaptive block sizes consistent
+# across images regardless of how small the leaf is in the frame.
 WORK_SIZE   = 512
+
+# Padding around the bounding box before upscale.
+# Prevents edge-halo artefacts from top-hat at the crop boundary.
 ROI_PAD_PX  = 12
+
+# Minimum linear dimension (px) of the crop before upscale.
+# Crops smaller than this have no usable vein detail — return zeros.
 MIN_CROP_PX = 30
 
 
-
+# ---------------------------------------------------------------------------
 # Internal helpers
+# ---------------------------------------------------------------------------
+
 def _get_padded_bbox(leaf_mask: np.ndarray,
                      pad: int = ROI_PAD_PX
                      ) -> tuple[int, int, int, int] | None:
@@ -362,7 +427,34 @@ def _build_vein_map(gray_work: np.ndarray,
 def extract_vein_features(img_sharp_bgr: np.ndarray,
                           leaf_mask: np.ndarray
                           ) -> tuple[dict, np.ndarray, np.ndarray]:
+    """
+    Extract shadow-robust, small-leaf-stable vein features.
 
+    Parameters
+    ----------
+    img_sharp_bgr : enhanced BGR uint8 image (output of enhance.py), 512×512
+    leaf_mask     : uint8 binary mask (255 = foreground), 512×512
+
+    Returns
+    -------
+    feats       : dict — 4 vein features + 2 diagnostic columns
+    vein_skel   : uint8 skeleton image in ORIGINAL 512×512 frame
+    vein_binary : uint8 thresholded vein map in ORIGINAL 512×512 frame
+
+    Pipeline summary
+    ----------------
+    1. Crop to padded leaf bounding box.
+    2. Upscale crop to WORK_SIZE (512px longest side) with INTER_CUBIC.
+       → All subsequent ops see the leaf at a consistent scale regardless
+         of how small it was in the original frame.
+    3. CLAHE (8×8 tiles = 64px each at WORK_SIZE) on full grayscale.
+    4. Black top-hat (15px ellipse) on full equalised image, then mask.
+    5. Adaptive threshold + skeletonise.
+    6. Downscale vein maps back to original crop size, place in full frame.
+    7. Compute density ratios using ORIGINAL mask pixel count (not upscaled)
+       so that features are consistent with colour/texture/shape features
+       which all use the original 512×512 coordinate space.
+    """
     gray    = cv2.cvtColor(img_sharp_bgr, cv2.COLOR_BGR2GRAY)
     H, W    = gray.shape[:2]
     px_mask = leaf_mask > 0
@@ -371,8 +463,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     if px_mask.sum() < 100:
         empty = np.zeros((H, W), dtype=np.uint8)
         return {
-            "vein_density": 0.0, "vein_length_ratio": 0.0,
-            "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
+            "botanical_vein_density": 0.0, "botanical_vein_length_ratio": 0.0,
+            "botanical_vein_branch_density": 0.0, "botanical_vein_end_point_density": 0.0,
             "vein_coverage_pct": 0.0, "vein_roi_scale": 1.0,
             "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
             "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
@@ -388,8 +480,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     if bbox is None:
         empty = np.zeros((H, W), dtype=np.uint8)
         return {
-            "vein_density": 0.0, "vein_length_ratio": 0.0,
-            "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
+            "botanical_vein_density": 0.0, "botanical_vein_length_ratio": 0.0,
+            "botanical_vein_branch_density": 0.0, "botanical_vein_end_point_density": 0.0,
             "vein_coverage_pct": round(coverage_pct, 4), "vein_roi_scale": 1.0,
             "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
             "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
@@ -406,8 +498,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     if min(crop_h, crop_w) < MIN_CROP_PX:
         empty = np.zeros((H, W), dtype=np.uint8)
         return {
-            "vein_density": 0.0, "vein_length_ratio": 0.0,
-            "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
+            "botanical_vein_density": 0.0, "botanical_vein_length_ratio": 0.0,
+            "botanical_vein_branch_density": 0.0, "botanical_vein_end_point_density": 0.0,
             "vein_coverage_pct": round(coverage_pct, 4), "vein_roi_scale": 0.0,
             "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
             "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
@@ -443,17 +535,29 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     # leaf_area_px is from the original mask (512×512 space).
     # skel_px is counted in the full-frame vein_skel (same space).
     # This keeps vein features in the same units as colour/texture/shape.
+    #
+    # RECLASSIFIED to botanical_* (this revision): vein density and
+    # branching pattern are an established character in plant leaf
+    # morphology / venation-architecture classification -- not a generic
+    # CV descriptor computed for its own sake. These four were originally
+    # left unprefixed when the botanical_ naming convention was introduced
+    # later in the project for the newer oil-gland/gloss/reticulation
+    # features; that was an oversight in the naming convention, not a
+    # judgement that vein density/branching lacks botanical grounding.
+    # Reclassified so the SVM branch's guaranteed_botanical / pairwise_aware
+    # selection (which keys off the "botanical_" substring) treats them
+    # consistently with the rest of the botanical feature set.
     skel_px = float((vein_skel > 0).sum())
 
     feats: dict = {}
-    feats["vein_density"] = skel_px / leaf_area_px if leaf_area_px > 0 else 0.0
+    feats["botanical_vein_density"] = skel_px / leaf_area_px if leaf_area_px > 0 else 0.0
 
     # ── Length ratio (normalised by contour perimeter) ─────────────────────
     # Perimeter from original mask — consistent with shape features.
     cnts, _ = cv2.findContours(leaf_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     perimeter = (float(cv2.arcLength(max(cnts, key=cv2.contourArea), True))
                  if cnts else 1.0)
-    feats["vein_length_ratio"] = skel_px / perimeter if perimeter > 0 else 0.0
+    feats["botanical_vein_length_ratio"] = skel_px / perimeter if perimeter > 0 else 0.0
 
     # ── Branch & end-point densities ──────────────────────────────────────
     k_n    = np.ones((3, 3), np.uint8);  k_n[1, 1] = 0
@@ -464,8 +568,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     branch_pts = int((nbr >= 3).sum())
     end_pts    = int((nbr == 1).sum())
 
-    feats["vein_branch_density"]    = branch_pts / leaf_area_px if leaf_area_px > 0 else 0.0
-    feats["vein_end_point_density"] = end_pts    / leaf_area_px if leaf_area_px > 0 else 0.0
+    feats["botanical_vein_branch_density"]    = branch_pts / leaf_area_px if leaf_area_px > 0 else 0.0
+    feats["botanical_vein_end_point_density"] = end_pts    / leaf_area_px if leaf_area_px > 0 else 0.0
 
     # ── Diagnostic columns (not used by classifier, for audit CSV only) ───
     feats["vein_coverage_pct"] = round(coverage_pct, 4)

@@ -174,6 +174,7 @@ def _extract_botanical_colour_features(img_bgr: np.ndarray, leaf_mask: np.ndarra
         feats["botanical_oil_gland_density"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_highlight_fraction"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_v_p95_median_ratio"] = _BOTANICAL_SENTINEL
+        feats["botanical_pigmentation_wax_index"] = _BOTANICAL_SENTINEL
         return feats
 
     img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
@@ -217,6 +218,40 @@ def _extract_botanical_colour_features(img_bgr: np.ndarray, leaf_mask: np.ndarra
     v_p95 = np.percentile(v_vals, 95)
     feats["botanical_gloss_v_p95_median_ratio"] = float(v_p95 / (v_median + 1e-6))
 
+    # ── Composite pigmentation/wax index ───────────────────────────────────
+    # Added after the kattakumanjal/kalawal pairwise-separability audit
+    # (analyze_pair_features.py) found colour_lab_b and colour_hsv_s among
+    # the strongest per-feature discriminators for that pair, alongside the
+    # gloss/oil-gland features already computed above. All four measure
+    # different observable consequences of the SAME underlying trait --
+    # foliar pigmentation darkness and cuticular wax bloom -- consistent
+    # with kattakumanjal being the dark, glossier species that required the
+    # Tier-2 dark-pigment seed fallback in masking.py. This is a project-
+    # specific composite (the exact formula/weights are engineering choices
+    # for this dissertation, not a citation to an external standard index),
+    # but every INPUT to it is individually a real, named, botanically
+    # interpretable measurement -- not a repackaged generic descriptor.
+    #
+    # Each component is scaled to roughly [0, 1] before averaging (LAB b*
+    # and HSV S are already 0-255 in OpenCV's uint8 representation; the
+    # gloss ratio is clipped to an empirically reasonable 1.0-2.5 range
+    # before min-max scaling, since it has no natural [0,255] bound). Left
+    # UNNORMALISED beyond that per-image (no dataset-level z-scoring) --
+    # StandardScaler already sits in front of SVC in the SVM branch, so raw
+    # scale differences between this and other features are handled there;
+    # RF/HGB are scale-invariant by construction.
+    lab_b_vals = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)[:, :, 2][px].astype(np.float64)
+    lab_b_median = float(np.median(lab_b_vals))
+    hsv_s_median = float(np.median(s_vals))
+
+    darkness_component = 1.0 - (lab_b_median / 255.0)          # lower b* (less yellow) -> higher score
+    desaturation_component = 1.0 - (hsv_s_median / 255.0)      # lower saturation -> higher score
+    gloss_component = float(np.clip((feats["botanical_gloss_v_p95_median_ratio"] - 1.0) / 1.5, 0.0, 1.0))
+
+    feats["botanical_pigmentation_wax_index"] = float(
+        (darkness_component + desaturation_component + gloss_component) / 3.0
+    )
+
     return feats
 
 
@@ -238,7 +273,8 @@ def extract_colour_features(img_bgr: np.ndarray,
            + trimmed mean on V channel
            + dominant hue + hue peak fraction
            + 6-bin normalised hue histogram
-           + botanical_* : oil-gland-dot density + surface glossiness
+           + botanical_* : oil-gland-dot density + surface glossiness +
+             pigmentation/wax composite index
 
     Shadow robustness
     -----------------
@@ -300,6 +336,7 @@ def extract_colour_features(img_bgr: np.ndarray,
         feats["botanical_oil_gland_density"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_highlight_fraction"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_v_p95_median_ratio"] = _BOTANICAL_SENTINEL
+        feats["botanical_pigmentation_wax_index"] = _BOTANICAL_SENTINEL
 
     return feats
 
