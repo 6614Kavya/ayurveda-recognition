@@ -31,6 +31,8 @@ from .petal_morphometrics import extract_petal_morphometrics
 from .filament_core import extract_filament_core_features
 from .petal_overlap import extract_petal_overlap_features
 from .vein_center import extract_vein_center_features
+from .symmetry import extract_symmetry_features
+from .petal_marking import extract_petal_marking_features
 
 __all__ = [
     "extract_color_features",
@@ -43,4 +45,6 @@ __all__ = [
     "extract_filament_core_features",
     "extract_petal_overlap_features",
     "extract_vein_center_features",
+    "extract_symmetry_features",
+    "extract_petal_marking_features",
 ]
