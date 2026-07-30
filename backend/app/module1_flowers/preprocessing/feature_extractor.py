@@ -11,6 +11,8 @@ from .features import (
     extract_filament_core_features,
     extract_petal_overlap_features,
     extract_vein_center_features,
+    extract_symmetry_features,
+    extract_petal_marking_features,
 )
 
 FEATURE_BREAKDOWN = {
@@ -24,6 +26,8 @@ FEATURE_BREAKDOWN = {
     'filament_core'  : 9,
     'petal_overlap'  : 5,
     'vein_center'    : 5,
+    'symmetry'       : 3,
+    'petal_marking'  : 4,
 }
 TOTAL_FEATURES = sum(FEATURE_BREAKDOWN.values())  # 210
 
@@ -40,10 +44,12 @@ def extract_all_features(roi: dict) -> np.ndarray:
     filament_core = extract_filament_core_features(roi['roi_rgb'], roi['roi_gray'], roi['roi_mask'])
     petal_overlap = extract_petal_overlap_features(roi['roi_mask'])
     vein_center = extract_vein_center_features(roi['roi_rgb'], roi['roi_gray'], roi['roi_mask'])
+    symmetry = extract_symmetry_features(roi['roi_mask'])
+    petal_marking = extract_petal_marking_features(roi['roi_rgb'], roi['roi_mask'])
 
     feature_vec = np.concatenate([
         color, glcm, lbp, gabor, shape, petal,
-        petal_morph, filament_core, petal_overlap, vein_center
+        petal_morph, filament_core, petal_overlap, vein_center, symmetry, petal_marking
     ])
 
     assert feature_vec.shape[0] == TOTAL_FEATURES, (
