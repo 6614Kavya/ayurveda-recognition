@@ -2,7 +2,5 @@ venv/
 __pycache__/
 *.pyc
 .env
-*.joblib
 *.h5
-*.pkl
 .DS_Store
