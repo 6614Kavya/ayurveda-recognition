@@ -3,12 +3,29 @@ import numpy as np
 from app.module3_compound_leaves.preprocessing.config import TARGET_LONG, MIN_COMP_FRAC
 
 
-
+# ---------------------------------------------------------------------------
 # Public API
-
+# ---------------------------------------------------------------------------
 
 def extract_whole_leaf_features(mask_full: np.ndarray) -> dict:
- 
+    """
+    Parameters
+    ----------
+    mask_full : uint8 binary mask (255 = foreground); may have multiple components
+
+    Returns
+    -------
+    dict with keys:
+        whole_aspect, n_components_norm, symmetry_lr_ratio, symmetry_score
+
+    Shadow robustness
+    -----------------
+    Features are based on connected-component statistics (centroids, areas).
+    Shadow at leaf boundaries inflates all component areas proportionally,
+    which cancels out in the left/right area ratio used for symmetry.
+    Centroids are area-weighted means — small boundary additions shift them
+    negligibly (< 1 px at typical shadow widths of 5–15 px).
+    """
     feats: dict = {}
     min_area = TARGET_LONG * TARGET_LONG * MIN_COMP_FRAC
 

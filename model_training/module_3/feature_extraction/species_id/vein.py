@@ -463,8 +463,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     if px_mask.sum() < 100:
         empty = np.zeros((H, W), dtype=np.uint8)
         return {
-            "vein_density": 0.0, "vein_length_ratio": 0.0,
-            "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
+            "botanical_vein_density": 0.0, "botanical_vein_length_ratio": 0.0,
+            "botanical_vein_branch_density": 0.0, "botanical_vein_end_point_density": 0.0,
             "vein_coverage_pct": 0.0, "vein_roi_scale": 1.0,
             "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
             "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
@@ -480,8 +480,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     if bbox is None:
         empty = np.zeros((H, W), dtype=np.uint8)
         return {
-            "vein_density": 0.0, "vein_length_ratio": 0.0,
-            "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
+            "botanical_vein_density": 0.0, "botanical_vein_length_ratio": 0.0,
+            "botanical_vein_branch_density": 0.0, "botanical_vein_end_point_density": 0.0,
             "vein_coverage_pct": round(coverage_pct, 4), "vein_roi_scale": 1.0,
             "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
             "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
@@ -498,8 +498,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     if min(crop_h, crop_w) < MIN_CROP_PX:
         empty = np.zeros((H, W), dtype=np.uint8)
         return {
-            "vein_density": 0.0, "vein_length_ratio": 0.0,
-            "vein_branch_density": 0.0, "vein_end_point_density": 0.0,
+            "botanical_vein_density": 0.0, "botanical_vein_length_ratio": 0.0,
+            "botanical_vein_branch_density": 0.0, "botanical_vein_end_point_density": 0.0,
             "vein_coverage_pct": round(coverage_pct, 4), "vein_roi_scale": 0.0,
             "botanical_vein_spacing_period": _BOTANICAL_SENTINEL,
             "botanical_vein_prominence_contrast": _BOTANICAL_SENTINEL,
@@ -535,17 +535,29 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     # leaf_area_px is from the original mask (512×512 space).
     # skel_px is counted in the full-frame vein_skel (same space).
     # This keeps vein features in the same units as colour/texture/shape.
+    #
+    # RECLASSIFIED to botanical_* (this revision): vein density and
+    # branching pattern are an established character in plant leaf
+    # morphology / venation-architecture classification -- not a generic
+    # CV descriptor computed for its own sake. These four were originally
+    # left unprefixed when the botanical_ naming convention was introduced
+    # later in the project for the newer oil-gland/gloss/reticulation
+    # features; that was an oversight in the naming convention, not a
+    # judgement that vein density/branching lacks botanical grounding.
+    # Reclassified so the SVM branch's guaranteed_botanical / pairwise_aware
+    # selection (which keys off the "botanical_" substring) treats them
+    # consistently with the rest of the botanical feature set.
     skel_px = float((vein_skel > 0).sum())
 
     feats: dict = {}
-    feats["vein_density"] = skel_px / leaf_area_px if leaf_area_px > 0 else 0.0
+    feats["botanical_vein_density"] = skel_px / leaf_area_px if leaf_area_px > 0 else 0.0
 
     # ── Length ratio (normalised by contour perimeter) ─────────────────────
     # Perimeter from original mask — consistent with shape features.
     cnts, _ = cv2.findContours(leaf_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     perimeter = (float(cv2.arcLength(max(cnts, key=cv2.contourArea), True))
                  if cnts else 1.0)
-    feats["vein_length_ratio"] = skel_px / perimeter if perimeter > 0 else 0.0
+    feats["botanical_vein_length_ratio"] = skel_px / perimeter if perimeter > 0 else 0.0
 
     # ── Branch & end-point densities ──────────────────────────────────────
     k_n    = np.ones((3, 3), np.uint8);  k_n[1, 1] = 0
@@ -556,8 +568,8 @@ def extract_vein_features(img_sharp_bgr: np.ndarray,
     branch_pts = int((nbr >= 3).sum())
     end_pts    = int((nbr == 1).sum())
 
-    feats["vein_branch_density"]    = branch_pts / leaf_area_px if leaf_area_px > 0 else 0.0
-    feats["vein_end_point_density"] = end_pts    / leaf_area_px if leaf_area_px > 0 else 0.0
+    feats["botanical_vein_branch_density"]    = branch_pts / leaf_area_px if leaf_area_px > 0 else 0.0
+    feats["botanical_vein_end_point_density"] = end_pts    / leaf_area_px if leaf_area_px > 0 else 0.0
 
     # ── Diagnostic columns (not used by classifier, for audit CSV only) ───
     feats["vein_coverage_pct"] = round(coverage_pct, 4)

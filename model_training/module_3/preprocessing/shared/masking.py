@@ -508,19 +508,18 @@ def select_mask(img_resized: np.ndarray,
     # Stage 7: union of leaflet + rachis masks
     combined = cv2.bitwise_or(leaflet_mask, rachis_mask)
 
+    # preprocessing/shared/masking.py — inside select_mask(), after Stage 8:
+
     # Stage 8: flood-fill holes BEFORE _remove_noise
-    # Order is critical: _remove_noise after fill so filled leaflet interiors
-    # are not deleted as small isolated components
     filled = _fill_holes(combined)
 
     # Stage 9: final clean
     mask_final = cv2.morphologyEx(filled, cv2.MORPH_CLOSE, k3, iterations=1)
     mask_final = _remove_noise(mask_final, min_frac=min_comp_frac, img_area=img_area)
-    # In select_mask(), after the final _remove_noise call, add:
     is_paper_leak = (img_lab_float[:, :, 0] > 175) & (hsv[:, :, 1].astype(np.float32) < 25)
     mask_final[is_paper_leak] = 0
-    mask_final = _remove_noise(mask_final, min_frac=min_comp_frac, img_area=img_area)  # re-clean
-    mask_final[is_padding] = 0   # belt-and-braces: remove any border artefacts
+    mask_final = _remove_noise(mask_final, min_frac=min_comp_frac, img_area=img_area)
+    mask_final[is_padding] = 0
 
     coverage     = float((mask_final > 0).sum()) / img_area
     n_components = cv2.connectedComponentsWithStats(mask_final)[0] - 1
@@ -548,6 +547,18 @@ def select_mask(img_resized: np.ndarray,
         # Final
         "coverage_pct":       round(coverage * 100, 2),
         "n_final_components": n_components,
+        # NEW — Stage-7 union mask, pre-hole-fill. Required by
+        # feature_extraction/health/holes.py and scar.py. Was silently
+        # dropped before (never in diag), so hole_count/scar_tissue_ratio
+        # were sentinel on EVERY row, not just augmented ones. Carried as
+        # the raw uint8 array (0/255), same convention as mask_final.
+        "mask_before_holefill": combined.copy(),
+        # NEW — Stage-6 rachis mask, required by feature_extraction/health/
+        # boundary.py and scar.py to gate natural leaflet-junction
+        # concavity/shadow out of margin-damage features (see project memory
+        # -- previously this only lived as a pixel COUNT (rachis_px), never
+        # as the actual mask, so boundary/scar had no way to use it).
+        "rachis_mask": rachis_mask.copy(),
     }
 
     return mask_final, mask_choice, diag

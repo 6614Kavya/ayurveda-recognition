@@ -1,16 +1,118 @@
+"""
+VedaVision — Colour Features  (shadow-robust revision v2 — hue-histogram fix)
+===============================================================================
+Per-pixel intensity statistics from the ORIGINAL masked image (pre-enhancement).
+Extracted from BGR, HSV, LAB colour spaces + ExG index + normalised hue histogram.
+
+BUG FIXED in v2
+---------------
+The 18-bin hue histogram (bins 00–17, each 10°) was producing 13 near-zero bins
+because all compound leaf species have hue concentrated in the green range
+(approximately 30–90° in OpenCV's 0–180° H scale, i.e. bins 03–09 in the
+old 10°-per-bin scheme).
+
+Analysis of the extracted dataset showed:
+    bin 03  mean ≈ 0.717   (dominant — yellow-green)
+    bin 04  mean ≈ 0.247   (secondary — green)
+    bin 02  mean ≈ 0.032   (minor — yellow fringe)
+    bins 00,01,05–17       all < 0.003  (essentially zero for every sample)
+
+The 13 near-zero bins:
+  (a) carry no discriminative signal — between-species variance < 1e-7
+  (b) add noise to the feature vector
+  (c) waste 13 of 72 total colour feature slots
+
+FIX: Replace the 18 × 10° bins with 6 × 30° bins covering the full 0–180° range.
+
+    Bin  0 :   0– 30°   red-orange
+    Bin  1 :  30– 60°   yellow-green (dominant for most leaves)
+    Bin  2 :  60– 90°   green
+    Bin  3 :  90–120°   blue-green / cyan
+    Bin  4 : 120–150°   blue
+    Bin  5 : 150–180°   magenta-red
+
+30°-wide bins still distinguish species-level hue shifts (e.g. yellowish vs
+deep-green vs bluish-green leaves) while eliminating the empty 13-bin problem.
+The histogram remains normalised and sums to 1.0.
+
+Shadow-robustness notes (unchanged from v1)
+-------------------------------------------
+REPLACED  mean / std        →  median + IQR
+ADDED     trimmed_mean      →  10 % trim on Value channel
+ADDED     dominant_hue      →  histogram peak (unaffected by shadow minority peak)
+ADDED     hue_peak_fraction →  how dominant the peak colour is
+KEPT      skewness/kurtosis →  shadow contamination shifts these detectably
+KEPT      hue histogram     →  normalised; shadow adds small dark bin, peak unchanged
+
+NOTE: Always pass img_bgr = the RAW letterboxed image (img_resized), NOT img_sharp.
+      Enhancement steps change colour distributions and would corrupt these features.
+
+====================================================================
+BOTANICAL / HANDCRAFTED ADDITIONS (this revision)
+====================================================================
+Two new features, both prefixed `botanical_`, targeting field marks from
+the look-alike-pair reference that are NOT captured by the standard
+per-channel statistics above:
+
+1. botanical_oil_gland_density — pellucid oil/gland dots (present across
+   the whole blade in Kasthuri_Dehi, completely absent in Thunpath_Kurundu
+   — flagged in the reference doc as "the single most reliable naked-eye
+   marker in the entire set"). Detected as small local-intensity blobs via
+   Laplacian-of-Gaussian at a fixed small scale, reported as a DENSITY
+   (blobs per unit leaf area), not a raw count — consistent with the
+   project's no-leaflet-count constraint, and also makes the feature
+   scale-invariant across zoom levels.
+
+2. botanical_gloss_highlight_fraction / botanical_gloss_v_p95_median_ratio
+   — surface glossiness (matte in Kalawal vs glossy in Kattakumanjal).
+   Glossy leaf surfaces produce small specular highlights under normal
+   lighting (bright, desaturated pixel clusters) even though the median
+   leaf colour looks the same as a matte leaf; matte surfaces don't.
+
+STATUS: not yet visually validated against real Kasthuri_Dehi /
+Thunpath_Kurundu or Kalawal / Kattakumanjal photos — the LoG blob-detector
+scale in particular is a starting guess (tuned for a 512px working
+resolution) and should be checked against real oil-dot pixel size before
+trusting the numbers.
+"""
 
 import cv2
 import numpy as np
 from scipy.stats import skew as _skew, kurtosis as _kurt, trim_mean as _trim
 from skimage.feature import blob_log
 
-# Hue histogram configuration
 
+# ---------------------------------------------------------------------------
+# Hue histogram configuration
+# ---------------------------------------------------------------------------
 _HUE_BINS  = 6          # 6 bins × 30° = full 0–180° OpenCV hue range
 _HUE_RANGE = (0.0, 180.0)
 
+# ---------------------------------------------------------------------------
+# Stat suffixes produced per channel by _robust_stats() — single source of
+# truth so the redundant-column list below can never drift out of sync with
+# the actual column names this module emits.
+# ---------------------------------------------------------------------------
 _STAT_SUFFIXES = ("median", "iqr", "q25", "q75", "skew", "kurt")
 
+# ---------------------------------------------------------------------------
+# Redundant channels — verified >0.97 correlated with colour_lab_l_* on the
+# current training export (up to r=0.999 for hsv_v vs lab_l). HSV-V, LAB-L
+# and BGR-G/R are all measuring the same "how bright is this leaf" signal:
+# these images have a narrow green hue band, so brightness dominates channel
+# variance far more than hue does. LAB-L is kept as the single brightness
+# representative (perceptually decoupled from hue; matches how this module
+# already treats L separately from a/b). colour_bgr_b_* is kept — it is the
+# least correlated of the three BGR channels and carries the most
+# non-redundant signal.
+#
+# These columns are NOT dropped from extract_colour_features()'s output —
+# they stay in the full/diagnostic CSV for QC and correlation audits. They
+# ARE dropped from the classifier-ready CSV. batch_processor.py imports
+# REDUNDANT_CLF_COLS from here rather than hardcoding column names, so this
+# list is the only place that needs updating if the stat suffixes or the
+# redundant-channel decision ever change.
+# ---------------------------------------------------------------------------
 _REDUNDANT_CHANNEL_PREFIXES = ("hsv_v", "bgr_g", "bgr_r")
 
 REDUNDANT_CLF_COLS = [
@@ -19,16 +121,33 @@ REDUNDANT_CLF_COLS = [
     for suf in _STAT_SUFFIXES
 ]
 
+# ---------------------------------------------------------------------------
+# Botanical feature configuration
+# ---------------------------------------------------------------------------
+# Oil-gland dots are small (a few px across at 512px working resolution).
+# min/max sigma bracket the expected dot radius; STARTING GUESS, re-tune
+# against real Kasthuri_Dehi crops before trusting the output.
 _OIL_DOT_MIN_SIGMA = 1.0
 _OIL_DOT_MAX_SIGMA = 3.0
 _OIL_DOT_THRESHOLD = 0.02   # blob_log response threshold (lower = more sensitive)
 
 _BOTANICAL_SENTINEL = -1.0
 
+
+# ---------------------------------------------------------------------------
 # Internal helpers
+# ---------------------------------------------------------------------------
 
 def _robust_stats(vals: np.ndarray, prefix: str, out: dict) -> None:
-  
+    """
+    Compute shadow-robust statistics for a 1-D array of pixel values.
+
+    median  — unaffected by up to ~49 % outlier pixels
+    IQR     — spread without influence from dark shadow tail
+    Q25/Q75 — bracket the bulk of the distribution
+    skew    — shadow shifts this: useful diagnostic / discriminative feature
+    kurt    — same reasoning as skew
+    """
     if len(vals) == 0:
         for suf in _STAT_SUFFIXES:
             out[f"{prefix}_{suf}"] = 0.0
@@ -55,6 +174,7 @@ def _extract_botanical_colour_features(img_bgr: np.ndarray, leaf_mask: np.ndarra
         feats["botanical_oil_gland_density"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_highlight_fraction"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_v_p95_median_ratio"] = _BOTANICAL_SENTINEL
+        feats["botanical_pigmentation_wax_index"] = _BOTANICAL_SENTINEL
         return feats
 
     img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
@@ -98,16 +218,71 @@ def _extract_botanical_colour_features(img_bgr: np.ndarray, leaf_mask: np.ndarra
     v_p95 = np.percentile(v_vals, 95)
     feats["botanical_gloss_v_p95_median_ratio"] = float(v_p95 / (v_median + 1e-6))
 
+    # ── Composite pigmentation/wax index ───────────────────────────────────
+    # Added after the kattakumanjal/kalawal pairwise-separability audit
+    # (analyze_pair_features.py) found colour_lab_b and colour_hsv_s among
+    # the strongest per-feature discriminators for that pair, alongside the
+    # gloss/oil-gland features already computed above. All four measure
+    # different observable consequences of the SAME underlying trait --
+    # foliar pigmentation darkness and cuticular wax bloom -- consistent
+    # with kattakumanjal being the dark, glossier species that required the
+    # Tier-2 dark-pigment seed fallback in masking.py. This is a project-
+    # specific composite (the exact formula/weights are engineering choices
+    # for this dissertation, not a citation to an external standard index),
+    # but every INPUT to it is individually a real, named, botanically
+    # interpretable measurement -- not a repackaged generic descriptor.
+    #
+    # Each component is scaled to roughly [0, 1] before averaging (LAB b*
+    # and HSV S are already 0-255 in OpenCV's uint8 representation; the
+    # gloss ratio is clipped to an empirically reasonable 1.0-2.5 range
+    # before min-max scaling, since it has no natural [0,255] bound). Left
+    # UNNORMALISED beyond that per-image (no dataset-level z-scoring) --
+    # StandardScaler already sits in front of SVC in the SVM branch, so raw
+    # scale differences between this and other features are handled there;
+    # RF/HGB are scale-invariant by construction.
+    lab_b_vals = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)[:, :, 2][px].astype(np.float64)
+    lab_b_median = float(np.median(lab_b_vals))
+    hsv_s_median = float(np.median(s_vals))
+
+    darkness_component = 1.0 - (lab_b_median / 255.0)          # lower b* (less yellow) -> higher score
+    desaturation_component = 1.0 - (hsv_s_median / 255.0)      # lower saturation -> higher score
+    gloss_component = float(np.clip((feats["botanical_gloss_v_p95_median_ratio"] - 1.0) / 1.5, 0.0, 1.0))
+
+    feats["botanical_pigmentation_wax_index"] = float(
+        (darkness_component + desaturation_component + gloss_component) / 3.0
+    )
+
     return feats
 
 
-
+# ---------------------------------------------------------------------------
 # Public API
-
+# ---------------------------------------------------------------------------
 
 def extract_colour_features(img_bgr: np.ndarray,
                              leaf_mask: np.ndarray) -> dict:
-    
+    """
+    Parameters
+    ----------
+    img_bgr   : original (pre-enhancement) letterboxed BGR uint8 image
+    leaf_mask : uint8 binary mask (255 = foreground)
+
+    Returns
+    -------
+    dict — robust channel stats for B, G, R, H, S, V, L, a, b, ExG
+           + trimmed mean on V channel
+           + dominant hue + hue peak fraction
+           + 6-bin normalised hue histogram
+           + botanical_* : oil-gland-dot density + surface glossiness +
+             pigmentation/wax composite index
+
+    Shadow robustness
+    -----------------
+    All per-channel stats use median/IQR instead of mean/std.
+    Shadow pixels are a minority: median and IQR ignore them.
+    Histogram peak (dominant_hue) finds the most common leaf colour.
+    Trimmed mean on V drops the darkest 10 % of pixels before averaging.
+    """
     # ── Colour-space conversions ───────────────────────────────────────────
     img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
     img_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB)
@@ -161,13 +336,32 @@ def extract_colour_features(img_bgr: np.ndarray,
         feats["botanical_oil_gland_density"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_highlight_fraction"] = _BOTANICAL_SENTINEL
         feats["botanical_gloss_v_p95_median_ratio"] = _BOTANICAL_SENTINEL
+        feats["botanical_pigmentation_wax_index"] = _BOTANICAL_SENTINEL
 
     return feats
 
 
 def extract_colour_features_clf(img_bgr: np.ndarray,
                                   leaf_mask: np.ndarray) -> dict:
-   
-    
+    """
+    Classifier-ready variant of extract_colour_features().
+
+    Same extraction, same numbers — this just drops the columns in
+    REDUNDANT_CLF_COLS (hsv_v / bgr_g / bgr_r stat blocks) before returning,
+    so callers that only care about the model-training feature set don't
+    need to know about the drop-list mechanics.
+
+    Use extract_colour_features() (full dict) when writing the diagnostic
+    / full CSV — you want the redundant channels there for QC and
+    correlation audits. Use this one only when you want the trimmed,
+    classifier-input dict directly (e.g. quick single-image inference,
+    ad-hoc notebook checks).
+
+    batch_processor.py does NOT call this function — it calls
+    extract_colour_features() once per row and drops REDUNDANT_CLF_COLS
+    (plus the other groups' drop columns) at the whole-dataframe level when
+    writing *_clf.csv, so the full CSV and the clf CSV come from a single
+    extraction pass rather than two.
+    """
     feats = extract_colour_features(img_bgr, leaf_mask)
     return {k: v for k, v in feats.items() if k not in REDUNDANT_CLF_COLS}
