@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:http_parser/http_parser.dart';
+import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show kIsWeb, Uint8List;
+import 'package:file_selector/file_selector.dart' as fs;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Entry point
@@ -75,7 +78,7 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  static const String apiBase = 'http://localhost:8000';
+  static const String apiBase = 'https://ayurveda-recognition.onrender.com';
 
   Map<String, dynamic>? _health;
   Map<String, dynamic>? _prediction;
@@ -101,10 +104,33 @@ class _HomePageState extends State<HomePage> {
 
   // ── API: upload image to a prediction endpoint ──────────────────
   // endpoint: 'flower' | 'single-leaf' | 'compound-leaf'
-  Future<void> _handleUpload(String endpoint) async {
-    final picker = ImagePicker();
-    final picked = await picker.pickImage(source: ImageSource.gallery);
-    if (picked == null) return;
+  Future<void> _handleUpload(String endpoint, ImageSource source) async {
+    Uint8List bytes;
+    String filename;
+
+    if (_isDesktop && source == ImageSource.gallery) {
+      // Desktop gallery pick: use file_selector directly with a widened
+      // extension filter so HEIC/HEIF show up (image_picker's Windows/Linux/
+      // macOS path hardcodes jpg/jpeg/png/bmp/webp/gif and excludes heic).
+      final typeGroup = fs.XTypeGroup(
+        label: 'images',
+        extensions: ['jpg', 'jpeg', 'png', 'bmp', 'webp', 'heic', 'heif'],
+      );
+      final file = await fs.openFile(acceptedTypeGroups: [typeGroup]);
+      if (file == null) return; // user cancelled
+
+      bytes = await file.readAsBytes();
+      filename = file.name;
+    } else {
+      // Mobile (camera + gallery) and desktop camera: image_picker handles
+      // these fine, including HEIC on iOS/Android.
+      final picker = ImagePicker();
+      final picked = await picker.pickImage(source: source);
+      if (picked == null) return; // user cancelled
+
+      bytes = await picked.readAsBytes();
+      filename = picked.name;
+    }
 
     setState(() {
       _loading = true;
@@ -118,18 +144,12 @@ class _HomePageState extends State<HomePage> {
         Uri.parse('$apiBase/predict/$endpoint'),
       );
 
-      final bytes = await picked.readAsBytes();
-
-      // Figure out the correct MIME type from the filename extension
-      final ext = picked.name.split('.').last.toLowerCase();
-      final mimeType = (ext == 'png') ? 'png' : 'jpeg';
-
       request.files.add(
         http.MultipartFile.fromBytes(
           'file',
           bytes,
-          filename: picked.name,
-          contentType: MediaType('image', mimeType), // ← the key addition
+          filename: filename,
+          contentType: MediaType.parse(_mimeTypeFor(filename)),
         ),
       );
 
@@ -138,9 +158,7 @@ class _HomePageState extends State<HomePage> {
       final body = jsonDecode(res.body);
 
       if (res.statusCode == 200) {
-        setState(() {
-          _prediction = body as Map<String, dynamic>;
-        });
+        setState(() => _prediction = body as Map<String, dynamic>);
       } else {
         setState(() {
           _error =
@@ -149,13 +167,34 @@ class _HomePageState extends State<HomePage> {
         });
       }
     } catch (e) {
-      setState(() {
-        _error = 'Upload failed: $e';
-      });
+      setState(() => _error = 'Upload failed: $e');
     } finally {
-      setState(() {
-        _loading = false;
-      });
+      setState(() => _loading = false);
+    }
+  }
+
+  // Detects desktop platforms (Windows/Linux/macOS) — this is where
+  // image_picker's gallery filter can't be widened, so we route to
+  // file_selector instead. Web and mobile keep using image_picker.
+  bool get _isDesktop =>
+      !kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+
+  // Proper extension → MIME type mapping, including HEIC/HEIF
+  String _mimeTypeFor(String filename) {
+    final ext = filename.split('.').last.toLowerCase();
+    switch (ext) {
+      case 'png':
+        return 'image/png';
+      case 'heic':
+        return 'image/heic';
+      case 'heif':
+        return 'image/heif';
+      case 'webp':
+        return 'image/webp';
+      case 'jpg':
+      case 'jpeg':
+      default:
+        return 'image/jpeg';
     }
   }
 
@@ -222,19 +261,21 @@ class _HomePageState extends State<HomePage> {
                       _UploadRow(
                         emoji: '🌸',
                         label: 'Flower Image',
-                        onPick: () => _handleUpload('flower'),
+                        onPick: (source) => _handleUpload('flower', source),
                       ),
                       const SizedBox(height: 16),
                       _UploadRow(
                         emoji: '🍃',
                         label: 'Single Leaf Image',
-                        onPick: () => _handleUpload('single-leaf'),
+                        onPick: (source) =>
+                            _handleUpload('single-leaf', source),
                       ),
                       const SizedBox(height: 16),
                       _UploadRow(
                         emoji: '🌿',
                         label: 'Compound Leaf Image',
-                        onPick: () => _handleUpload('compound-leaf'),
+                        onPick: (source) =>
+                            _handleUpload('compound-leaf', source),
                       ),
                     ],
                   ),
@@ -358,7 +399,7 @@ class _AppButton extends StatelessWidget {
 class _UploadRow extends StatelessWidget {
   final String emoji;
   final String label;
-  final VoidCallback onPick;
+  final void Function(ImageSource) onPick;
 
   const _UploadRow({
     required this.emoji,
@@ -374,21 +415,31 @@ class _UploadRow extends StatelessWidget {
         border: Border.all(color: AppColors.inputBorder),
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Label text
-          Expanded(
-            child: Text(
-              '$emoji $label',
-              style: const TextStyle(
-                fontWeight: FontWeight.w500,
-                color: AppColors.textPrimary,
-                fontSize: 14,
-              ),
+          Text(
+            '$emoji $label',
+            style: const TextStyle(
+              fontWeight: FontWeight.w500,
+              color: AppColors.textPrimary,
+              fontSize: 14,
             ),
           ),
-          // File picker button
-          _AppButton(label: 'Choose File', onPressed: onPick),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _AppButton(
+                label: '📷 Camera',
+                onPressed: () => onPick(ImageSource.camera),
+              ),
+              const SizedBox(width: 8),
+              _AppButton(
+                label: '🖼 Gallery',
+                onPressed: () => onPick(ImageSource.gallery),
+              ),
+            ],
+          ),
         ],
       ),
     );
