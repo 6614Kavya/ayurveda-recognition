@@ -7,3 +7,4 @@ __pycache__/
 
 # Notebooks 
 **/model_training/module_2_single_leaves/notebooks/
+backend/**/**/*.pkl

@@ -15,6 +15,13 @@ from app.module3_compound_leaves.feature_extraction.health import health_index a
 from models.health import classifier as _health_classifier  # noqa: F401
 from models.health.train_stage1_binary import Z_FEATURE_COLS as _DEFAULT_Z_FEATURE_COLS
 
+import sys
+from pathlib import Path
+
+MODULE3_DIR = Path(__file__).resolve().parent
+
+if str(MODULE3_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE3_DIR))
 
 class HealthIndexBundle:
     def __init__(self, model, subscore_columns: list[str], fit_target: str):
