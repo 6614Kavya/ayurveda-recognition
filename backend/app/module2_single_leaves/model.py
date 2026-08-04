@@ -6,7 +6,6 @@ from pathlib import Path
 import xgboost as xgb
 from sklearn.pipeline import Pipeline
 
- # Resolve absolute path to the directory containing this script
 MODEL_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 HEALTH_MODEL_DIR = os.path.join(MODEL_DIR, "models", "health_new")
 class PredictionError(Exception):
@@ -104,7 +103,7 @@ def get_health_artifacts():
     except Exception as e:
         raise PredictionError(f"Error loading Health Stage 1 artifacts: {str(e)}")
 
-    # Stage 2: Health Index SVR Regressor (unchanged -- not XGBoost, loads fine as one file)
+    # Stage 2: Health Index SVR Regressor  
     stage2_pipeline_path = os.path.join(HEALTH_MODEL_DIR, "stage2_health_index_regressor_pipeline.pkl")
     stage2_columns_path = os.path.join(HEALTH_MODEL_DIR, "stage2_health_index_feature_columns.pkl")
 
