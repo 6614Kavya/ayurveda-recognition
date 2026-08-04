@@ -1,5 +1,6 @@
 # Python
 backend/venv/
+venv/
 .venv/
 model_training/module_3/venv/
 backend/__pycache__/
