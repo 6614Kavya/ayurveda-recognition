@@ -1,22 +1,46 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
+
 from app.shared.schemas import PredictionResponse
-from app.shared.preprocess import load_and_resize
+from app.module3_compound_leaves.predictor import (
+    predict_species,
+    InvalidImageError,
+    LeafNotDetectedError,
+    FeatureMismatchError,
+)
+from app.module3_compound_leaves.species_metadata import get_species_display
+from app.module3_compound_leaves.model_loader import get_species_model
 
 router = APIRouter(prefix="/predict", tags=["Module 3 — Compound leaves"])
+
 
 @router.post("/compound-leaf", response_model=PredictionResponse)
 async def predict_compound_leaf(file: UploadFile = File(...)):
     if file.content_type not in ["image/jpeg", "image/png", "image/jpg"]:
         raise HTTPException(status_code=400, detail="Only JPEG and PNG images accepted")
-    
+
     image_bytes = await file.read()
-    img = load_and_resize(image_bytes)
+
+    try:
+        result = predict_species(image_bytes)
+    except InvalidImageError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LeafNotDetectedError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Leaf not detected in image ({e.reason}). "
+                   "Please retake the photo against a plain white background "
+                   "with the whole compound leaf in frame.",
+        )
+    except FeatureMismatchError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    display = get_species_display(result["species"])
 
     return PredictionResponse(
-        plant_name="Araliya",
-        confidence=0.95,
+        plant_name=display["plant_name"],
+        confidence=result["confidence"],
         module="module3_compound_leaves",
-        sinhala_name="අරලිය",
-        uses="Flowers used in religious ceremonies and traditional medicine",
-        diseases_treated=["anxiety", "insomnia"]
+        sinhala_name=display["sinhala_name"],
+        uses=display["uses"],
+        diseases_treated=display["diseases_treated"],
     )
