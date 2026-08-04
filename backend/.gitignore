@@ -2,7 +2,9 @@ venv/
 __pycache__/
 *.pyc
 .env
-*.joblib
 *.h5
-*.pkl
 .DS_Store
+
+# Notebooks 
+**/model_training/module_2_single_leaves/notebooks/
+backend/**/**/*.pkl
