@@ -32,3 +32,5 @@ model_training/module_3/processed/
 .DS_Store
 Thumbs.db
 
+
+venv_test_upgrade/
