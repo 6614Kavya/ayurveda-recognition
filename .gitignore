@@ -34,3 +34,6 @@ Thumbs.db
 
 
 venv_test_upgrade/
+
+#notebooks
+model_training/module_2/notebooks/
