@@ -114,6 +114,17 @@ def get_health_artifacts():
             artifacts["stage2_columns"] = joblib.load(stage2_columns_path)
         except Exception as e:
             print(f"Warning: Could not load Stage 2 artifacts ({e}).")
+    # Damage Breakdown: Ridge pipeline (category-level explanation, optional)
+        ridge_pipeline_path = os.path.join(HEALTH_MODEL_DIR, "health_damage_breakdown_ridge_pipeline.pkl")
+        ridge_columns_path = os.path.join(HEALTH_MODEL_DIR, "health_damage_breakdown_feature_columns.pkl")
+     
+        if os.path.exists(ridge_pipeline_path) and os.path.exists(ridge_columns_path):
+            try:
+                artifacts["ridge_pipeline"] = joblib.load(ridge_pipeline_path)
+                _patch_scikit_learn_compat(artifacts["ridge_pipeline"])
+                artifacts["ridge_columns"] = joblib.load(ridge_columns_path)
+            except Exception as e:
+                print(f"Warning: Could not load damage breakdown artifacts ({e}).")
 
     _health_artifacts_cache = artifacts
     return artifacts
