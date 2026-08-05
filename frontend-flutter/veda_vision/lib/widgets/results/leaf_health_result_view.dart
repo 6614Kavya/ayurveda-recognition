@@ -82,7 +82,9 @@ class LeafHealthResultView extends StatelessWidget {
           children: [
             Expanded(child: StatTile(label: 'Health Value', value: formatValue(healthValue))),
             const SizedBox(width: 12),
+            if (severityRaw != null) ...[
             Expanded(child: StatTile(label: 'Severity Score', value: formatValue(severityRaw))),
+            ],
           ],
         ),
         if (breakdown.isNotEmpty) ...[
