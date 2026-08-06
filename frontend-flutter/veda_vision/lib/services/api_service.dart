@@ -13,9 +13,7 @@ class ApiException implements Exception {
 }
 
 class ApiService {
-  // TODO: swap for your Render URL when testing against production,
-  // e.g. 'https://ayurveda-recognition.onrender.com' (no trailing slash).
-  static const String baseUrl = 'http://localhost:8000';
+  static const String baseUrl = 'https://ayurveda-recognition.onrender.com';
 
   static Future<Map<String, dynamic>> checkHealth() async {
     try {
