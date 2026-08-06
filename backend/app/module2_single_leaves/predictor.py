@@ -192,6 +192,11 @@ def predict_health(top_input, bottom_input):
     bottom_bgr = _decode(bottom_input)
     if top_bgr is None or bottom_bgr is None:
         raise PredictionError("Could not decode one or both image files.")
+    try:
+        species_result = predict_single_leaf(top_bgr)
+        species = species_result["plant_name"]
+    except  Exception:
+        species= "Unknown"
 
     top_processed = preprocess_health_image(top_bgr)
     bottom_processed = preprocess_health_image(bottom_bgr)
@@ -261,6 +266,7 @@ def predict_health(top_input, bottom_input):
     health_pct = round(float(health_index) * 100, 2)
 
     result = {
+         "species": species,
          "decision": stage1_status,
          "decision_confidence": round(float(confidence_pct), 4),
          "health_value": f"{health_pct}%",
