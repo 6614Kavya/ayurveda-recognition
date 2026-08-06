@@ -8,4 +8,4 @@ __pycache__/
 # Notebooks 
 **/model_training/module_2_single_leaves/notebooks/
 
-backend/models/species_id/vedavision_species_model.pkl
+models/species_id/vedavision_species_model.pkl
