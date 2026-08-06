@@ -13,7 +13,13 @@ class ApiException implements Exception {
 }
 
 class ApiService {
+<<<<<<< HEAD
   static const String baseUrl = 'http://localhost:8000'; //https://ayurveda-recognition.onrender.com
+=======
+  // TODO: swap for your Render URL when testing against production,
+  // e.g. 'https://ayurveda-recognition.onrender.com' (no trailing slash).
+  static const String baseUrl = 'http://localhost:8000';
+>>>>>>> 747ae86bc245713dcdffcc52c4b501d1c45f63e4
 
   static Future<Map<String, dynamic>> checkHealth() async {
     try {
