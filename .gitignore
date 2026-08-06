@@ -1,5 +1,6 @@
 # Python
 backend/venv/
+venv/
 .venv/
 model_training/module_3/venv/
 backend/__pycache__/
@@ -32,3 +33,9 @@ model_training/module_3/processed/
 .DS_Store
 Thumbs.db
 
+
+venv_test_upgrade/
+venv311/
+
+#notebooks
+model_training/module_2/notebooks/
