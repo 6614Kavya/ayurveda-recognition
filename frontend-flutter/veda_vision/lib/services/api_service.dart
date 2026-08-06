@@ -13,7 +13,7 @@ class ApiException implements Exception {
 }
 
 class ApiService {
-  static const String baseUrl = 'https://ayurveda-recognition.onrender.com';
+  static const String baseUrl = 'http://localhost:8000'; //https://ayurveda-recognition.onrender.com
 
   static Future<Map<String, dynamic>> checkHealth() async {
     try {

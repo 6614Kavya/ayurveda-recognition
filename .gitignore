@@ -8,7 +8,6 @@ backend/*.pyc
 backend/.env
 backend/*.joblib
 backend/*.h5
-backend/**/*.pkl
 __pycache__/
 *.pyc
 *.pyo
@@ -39,3 +38,4 @@ venv311/
 
 #notebooks
 model_training/module_2/notebooks/
+backend/models/species_id/vedavision_species_model.pkl
