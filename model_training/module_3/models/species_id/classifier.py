@@ -680,6 +680,68 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray,
     }
 
 
+def plot_confusion_matrix(cm_df: pd.DataFrame, title: str, save_path: str = None,
+                           normalize: bool = False, figsize: tuple = None,
+                           show: bool = True) -> None:
+    """
+    Render a confusion matrix (the "confusion_matrix" DataFrame returned by
+    evaluate_predictions(), or classifier.py's own cross_validate()'s raw
+    array wrapped in pd.DataFrame(cm, index=labels, columns=labels)) as an
+    annotated heatmap.
+
+    Matplotlib/seaborn are imported lazily here, not at module top, so
+    importing classifier.py for training/inference doesn't require a
+    plotting stack to be installed -- same lazy-import pattern already
+    used for run_feature_count_sweep in model_training.py.
+
+    Pass normalize=True to show row-wise (per true-class) proportions
+    instead of raw counts -- more readable once class counts are
+    imbalanced, which they are here (see LOOK_ALIKE_PAIRS).
+
+    Pass show=False (recommended when calling this from a plain script,
+    e.g. model_training.py run via `python -m ...` with no display attached)
+    so saving the PNG never depends on a GUI backend being available --
+    plt.show() can hang or raise on a headless box. Notebook callers can
+    leave show=True to see the plot inline as well as save it.
+    """
+    import matplotlib
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    data = cm_df.copy()
+    fmt = "d"
+    if normalize:
+        row_sums = data.sum(axis=1).replace(0, 1)  # guard against /0 on an empty class
+        data = data.div(row_sums, axis=0)
+        fmt = ".2f"
+
+    n_labels = len(cm_df)
+    if figsize is None:
+        side = max(6, 0.5 * n_labels)
+        figsize = (side, side)
+
+    plt.figure(figsize=figsize)
+    sns.heatmap(data, annot=True, fmt=fmt, cmap="Blues", square=True,
+                xticklabels=cm_df.columns, yticklabels=cm_df.index,
+                cbar_kws={"label": "proportion" if normalize else "count"})
+    plt.title(title)
+    plt.xlabel("Predicted species")
+    plt.ylabel("True species")
+    plt.xticks(rotation=45, ha="right")
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Saved confusion matrix plot to {save_path}")
+    if show:
+        try:
+            plt.show()
+        except Exception:
+            pass  # no display available -- the PNG above is already saved
+    plt.close()
+
+
 if __name__ == "__main__":
     # Example usage matching the project's train/test CSV convention.
     train = pd.read_csv("vedavision_features_train_clf.csv")

@@ -63,12 +63,13 @@ import pandas as pd
 import joblib
 
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.metrics import f1_score, classification_report
+from sklearn.metrics import f1_score, classification_report, confusion_matrix
 
 from models.species_id.classifier import (
     make_species_classifier, feature_diversity_report,
     svm_vote_impact_report, run_voting_weight_sweep,
     compare_svm_selection_strategies, report_final_svm_features,
+    plot_confusion_matrix,
 )
 from models.species_id.pair_specialist import (
     SpeciesClassifierWithPairSpecialist, evaluate_with_pair_specialist,
@@ -103,7 +104,7 @@ def load_xy(csv_path: str, require_groups: bool):
 # ---------------------------------------------------------------------------
 
 def cross_validate(X, y, groups, n_splits=5, random_state=1, feature_names=None,
-                    svm_selection="pairwise_aware"):
+                    svm_selection="pairwise_aware", diagnostics_dir: Path = None):
     outer = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     y_true, y_pred = [], []
 
@@ -119,7 +120,21 @@ def cross_validate(X, y, groups, n_splits=5, random_state=1, feature_names=None,
     print(f"\nFlat ensemble  F1-macro: {f1_macro:.4f}")
     print("\nClassification report:\n")
     print(classification_report(y_true, y_pred))
-    return f1_macro
+
+    # Confusion matrix over the pooled out-of-fold predictions (every row
+    # was predicted by a model that never trained on it, so this is an
+    # honest CV confusion matrix, not a training-set one).
+    labels = sorted(set(y_true) | set(y_pred))
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+    cm_df = pd.DataFrame(cm, index=labels, columns=labels)
+
+    counts_path = None
+    if diagnostics_dir is not None:
+        counts_path = str(diagnostics_dir / "species_cv_confusion_matrix_counts.png")
+    plot_confusion_matrix(cm_df, title="Species ID -- 5-fold CV (out-of-fold) -- counts",
+                           save_path=counts_path, normalize=False, show=False)
+
+    return f1_macro, cm_df
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +238,19 @@ def main():
     models_dir.mkdir(parents=True, exist_ok=True)
     model_out = models_dir / args.model_name
 
+    diagnostics_dir = out_root / "diagnostics"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+
     X, y, groups, feat_cols = load_xy(args.train, require_groups=True)
     print(f"Loaded {len(y)} rows, {len(feat_cols)} feature columns, "
           f"{len(set(groups))} unique source leaves.")
 
     print("\n=== 5-fold StratifiedGroupKFold CV (train data only) ===")
     print(f"(svm_selection={args.svm_selection}, random_state={args.random_state})")
-    cross_validate(X, y, groups, feature_names=feat_cols, svm_selection=args.svm_selection,
-                    random_state=args.random_state)
+    _, cv_cm_df = cross_validate(X, y, groups, feature_names=feat_cols,
+                                  svm_selection=args.svm_selection,
+                                  random_state=args.random_state,
+                                  diagnostics_dir=diagnostics_dir)
 
     if args.diversity_report:
         print("\n=== Base-learner diversity report ===")
@@ -342,6 +362,15 @@ def main():
         print("\n=== Held-out test set (sealed — run this only once) ===")
         print(f"F1-macro: {f1_score(yt, pred, average='macro'):.4f}")
         print(classification_report(yt, pred))
+
+        test_labels = sorted(set(yt) | set(pred))
+        test_cm = confusion_matrix(yt, pred, labels=test_labels)
+        test_cm_df = pd.DataFrame(test_cm, index=test_labels, columns=test_labels)
+        plot_confusion_matrix(
+            test_cm_df, title="Species ID -- sealed held-out test -- counts",
+            save_path=str(diagnostics_dir / "species_test_confusion_matrix_counts.png"),
+            normalize=False, show=False,
+        )
 
 
 if __name__ == "__main__":
