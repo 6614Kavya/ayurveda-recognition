@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import threading
 
 import cv2
 import joblib
@@ -17,33 +18,54 @@ from app.core.database import get_db
 
 router = APIRouter(prefix="/predict", tags=["Module 1 — Flowers"])
 
-# ── Load models once at startup ──────────────────────────────────
 BASE_DIR  = os.path.dirname(os.path.dirname(__file__))   # → backend/app
 MODEL_DIR = os.path.join(BASE_DIR, 'module1_flowers', 'models')
 IMG_SIZE  = (224, 224)
 
-try:
-    model   = joblib.load(os.path.join(MODEL_DIR, 'flower_model.joblib'))
-    scaler  = joblib.load(os.path.join(MODEL_DIR, 'flower_scaler.joblib'))
-    encoder = joblib.load(os.path.join(MODEL_DIR, 'flower_label_encoder.joblib'))
-    print(f'Flower SVM/RF model loaded. Classes: {list(encoder.classes_)}')
-except FileNotFoundError as e:
-    print(f'Model file missing: {e}')
-    model = scaler = encoder = None
+# ── Lazy-loaded model cache ──────────────────────────────────────
+_svm_cache = {}
+_cnn_cache = {}
+_svm_lock = threading.Lock()
+_cnn_lock = threading.Lock()
 
-try:
-    cnn_model = tf.keras.models.load_model(os.path.join(MODEL_DIR, 'model_adapted.keras'))
-    with open(os.path.join(MODEL_DIR, 'class_names.json')) as f:
-        CNN_CLASS_NAMES = json.load(f)
-    print(f'Flower CNN model loaded. Classes: {CNN_CLASS_NAMES}')
-except (FileNotFoundError, OSError) as e:
-    print(f'CNN model file missing: {e}')
-    cnn_model = None
-    CNN_CLASS_NAMES = []
+
+def get_svm_models():
+    """Load SVM/RF model, scaler, encoder on first call only. Cached after."""
+    if "model" not in _svm_cache:
+        with _svm_lock:
+            if "model" not in _svm_cache:  # double-checked locking
+                try:
+                    _svm_cache["model"] = joblib.load(os.path.join(MODEL_DIR, 'flower_model.joblib'))
+                    _svm_cache["scaler"] = joblib.load(os.path.join(MODEL_DIR, 'flower_scaler.joblib'))
+                    _svm_cache["encoder"] = joblib.load(os.path.join(MODEL_DIR, 'flower_label_encoder.joblib'))
+                    print(f'Flower SVM/RF model loaded. Classes: {list(_svm_cache["encoder"].classes_)}')
+                except FileNotFoundError as e:
+                    print(f'Model file missing: {e}')
+                    raise HTTPException(status_code=503, detail="Flower SVM/RF model not available on this server.")
+    return _svm_cache["model"], _svm_cache["scaler"], _svm_cache["encoder"]
+
+
+def get_cnn_model():
+    """Load CNN model + class names on first call only. Cached after."""
+    if "model" not in _cnn_cache:
+        with _cnn_lock:
+            if "model" not in _cnn_cache:  # double-checked locking
+                try:
+                    _cnn_cache["model"] = tf.keras.models.load_model(
+                        os.path.join(MODEL_DIR, 'model_adapted.keras'))
+                    with open(os.path.join(MODEL_DIR, 'class_names.json')) as f:
+                        _cnn_cache["class_names"] = json.load(f)
+                    print(f'Flower CNN model loaded. Classes: {_cnn_cache["class_names"]}')
+                except (FileNotFoundError, OSError) as e:
+                    print(f'CNN model file missing: {e}')
+                    raise HTTPException(status_code=503, detail="Flower CNN model not available on this server.")
+    return _cnn_cache["model"], _cnn_cache["class_names"]
 
 
 @router.post("/flower", response_model=PredictionResponse)
 async def predict_flower(file: UploadFile = File(...)):
+    model, scaler, encoder = get_svm_models()
+
     db = get_db()
     contents = await file.read()
 
@@ -60,7 +82,7 @@ async def predict_flower(file: UploadFile = File(...)):
 
     pred_encoded = model.predict(feat_scaled)[0]
     pred_label = encoder.inverse_transform([pred_encoded])[0]
-    confidence    = float(model.predict_proba(feat_scaled).max())
+    confidence = float(model.predict_proba(feat_scaled).max())
 
     plant_info = await db.flowers.find_one({"label": pred_label})
 
@@ -74,14 +96,7 @@ async def predict_flower(file: UploadFile = File(...)):
     )
 
 
-def _run_cnn_inference(roi: dict) -> np.ndarray:
-    """
-    Pulled out as its own plain function (not async) so it can be
-    handed to a threadpool via asyncio.to_thread below. model.predict()
-    is a blocking, CPU/GPU-bound call — running it directly inside an
-    `async def` endpoint would freeze the event loop for every other
-    concurrent request until this one finishes.
-    """
+def _run_cnn_inference(cnn_model, roi: dict) -> np.ndarray:
     cnn_input = cv2.resize(roi['roi_rgb'], IMG_SIZE).astype(np.float32)
     cnn_input = preprocess_input(cnn_input)
     cnn_input = np.expand_dims(cnn_input, axis=0)
@@ -90,8 +105,7 @@ def _run_cnn_inference(roi: dict) -> np.ndarray:
 
 @router.post("/flower/cnn", response_model=PredictionResponse)
 async def predict_flower_cnn(file: UploadFile = File(...)):
-    if cnn_model is None:
-        raise HTTPException(status_code=503, detail="CNN model not loaded on this server.")
+    cnn_model, class_names = get_cnn_model()
 
     db = get_db()
     contents = await file.read()
@@ -110,9 +124,9 @@ async def predict_flower_cnn(file: UploadFile = File(...)):
             detail=f"Could not isolate a flower in this image: {roi['status']}"
         )
 
-    probs = await asyncio.to_thread(_run_cnn_inference, roi)
+    probs = await asyncio.to_thread(_run_cnn_inference, cnn_model, roi)
     idx = int(np.argmax(probs))
-    pred_label = CNN_CLASS_NAMES[idx]
+    pred_label = class_names[idx]
     confidence = float(probs[idx])
 
     plant_info = await db.flowers.find_one({"label": pred_label})
