@@ -92,7 +92,9 @@ def assess_leaf_health(top_image_bytes: bytes, bottom_image_bytes: bytes,
     -------
     dict with keys: species, decision, decision_confidence,
     health_value (0-100, 100=healthiest), severity_score_raw,
-    breakdown (per-subscore % contribution to deviation),
+    symptoms (list of nonzero-contribution findings -- human name/
+    description/group/percentage, worst-first, percentages summing to
+    ~100 across whatever's returned; empty list if nothing contributed),
     view_diagnostics (per-view mask_choice/coverage_pct, for debugging
     a QC-borderline upload).
     """
@@ -169,7 +171,11 @@ def assess_leaf_health(top_image_bytes: bytes, bottom_image_bytes: bytes,
     if missing_subscores:
         raise HealthFeatureMismatchError(missing_subscores)
     severity_score = float(index_bundle.model.score(row_df)[0])
-    breakdown = index_bundle.model.score_breakdown(row_df.iloc[0])
+    # score_symptoms() (not score_breakdown()) is the public-facing
+    # output: same % values as score_breakdown(), just keyed by a
+    # human name/description/group instead of a raw `worst_*` column
+    # name. See that method's docstring in health_index.py.
+    symptoms = index_bundle.model.score_symptoms(row_df.iloc[0])
 
     # --- Stage 1 (the actual healthy/unhealthy decision) ---
     stage1_bundle = get_stage1_model()
@@ -196,7 +202,7 @@ def assess_leaf_health(top_image_bytes: bytes, bottom_image_bytes: bytes,
         "decision_confidence": round(decision_confidence, 3),
         "health_value": round(100.0 - severity_score, 2),
         "severity_score_raw": round(severity_score, 2),
-        "breakdown": breakdown,
+        "symptoms": symptoms,
         "view_diagnostics": {
             "top": {"mask_choice": top_info.get("mask_choice"), "coverage_pct": top_info.get("coverage_pct")},
             "bottom": {"mask_choice": bottom_info.get("mask_choice"), "coverage_pct": bottom_info.get("coverage_pct")},

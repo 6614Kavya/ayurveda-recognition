@@ -97,5 +97,5 @@ async def predict_compound_leaf_health(
         decision_confidence=result["decision_confidence"],
         health_value=result["health_value"],
         severity_score_raw=result["severity_score_raw"],
-        breakdown=result["breakdown"],
+        symptoms=result["symptoms"],
     )
