@@ -228,6 +228,71 @@ BINARY_PROXY_SCORE: Dict[str, float] = {"healthy": 0.0, "low": 1.0, "mid": 1.0, 
 DEFAULT_LEVEL_ORDER: Dict[str, int] = {"healthy": 0, "low": 1, "mid": 2, "high": 3}
 EPS = 1e-6
 
+# ---------------------------------------------------------------------
+# Human-facing metadata for SUBSCORE_RAW_COLUMNS, owned server-side so
+# every client (web, mobile, any future consumer of this API) gets the
+# same wording without re-implementing a name map on their end. Keep
+# this dict's keys in sync with SUBSCORE_RAW_COLUMNS above -- a missing
+# key here is a bug, not something callers should have to handle.
+# `group` powers UI grouping only; it carries no scoring weight.
+SUBSCORE_LABELS: Dict[str, Dict[str, str]] = {
+    "worst_ldsi_boundary_sub": {
+        "name": "Edge damage",
+        "description": "Torn, chewed, or irregular leaf margins",
+        "group": "Structural damage",
+    },
+    "worst_hole_count": {
+        "name": "Holes",
+        "description": "Openings found in the leaf blade",
+        "group": "Structural damage",
+    },
+    "worst_ldsi_miner_sub": {
+        "name": "Leaf miner trails",
+        "description": "Tunnel-like tracks left by insects feeding inside the leaf",
+        "group": "Structural damage",
+    },
+    "worst_colour_pct_chlorotic": {
+        "name": "Yellowing",
+        "description": "Areas that have lost their green colour",
+        "group": "Discolouration",
+    },
+    "worst_colour_pct_pale_patch": {
+        "name": "Pale patches",
+        "description": "Faded or bleached patches on the surface",
+        "group": "Discolouration",
+    },
+    "worst_texture_h_glcm_contrast_mean": {
+        "name": "Surface roughness",
+        "description": "Unevenness across the leaf's surface texture",
+        "group": "Surface & texture",
+    },
+    "worst_texture_h_lbp_entropy": {
+        "name": "Texture disruption",
+        "description": "Disturbance to the leaf's natural surface pattern",
+        "group": "Surface & texture",
+    },
+    "worst_deform_luminance_std": {
+        "name": "Leaf warping",
+        "description": "Curling, wrinkling, or shape distortion",
+        "group": "Surface & texture",
+    },
+    "worst_spot_count": {
+        "name": "Spots",
+        "description": "Number of distinct spots or lesions",
+        "group": "Spots & lesions",
+    },
+    "worst_spot_area_ratio": {
+        "name": "Spot coverage",
+        "description": "How much of the leaf surface the spots cover",
+        "group": "Spots & lesions",
+    },
+    "worst_spot_density_per_1000px": {
+        "name": "Spot clustering",
+        "description": "How closely packed the spots are",
+        "group": "Spots & lesions",
+    },
+}
+
 
 @dataclass
 class SpeciesNormStats:
@@ -460,6 +525,38 @@ class HealthIndexModel:
             pct = 0.0 if total < EPS else float(100.0 * contrib / total)
             breakdown[col] = round(pct, 1)
         return breakdown
+
+    def score_symptoms(self, row: pd.Series, species_col: str = "species") -> List[Dict]:
+        """Human-facing replacement for score_breakdown()'s raw `worst_*`
+        keys -- same percentages (% share of this leaf's own total
+        deviation, still summing to ~100 across whatever's returned),
+        just with a server-side name/description/group instead of a
+        column name, so every consumer of this API (web, mobile, any
+        future client) reads the same wording instead of reimplementing
+        its own `worst_*` -> label map.
+
+        Returns a list of only the NONZERO-contribution subscores, each
+        as {name, description, group, percentage}, sorted worst-first.
+        A subscore contributing ~0% is omitted entirely rather than
+        listed at 0.0.
+        """
+        breakdown = self.score_breakdown(row, species_col)  # col -> pct, sums to ~100
+
+        findings = []
+        for col in self.subscore_columns:
+            pct = breakdown.get(col, 0.0)
+            if pct <= 0.0:
+                continue
+            meta = SUBSCORE_LABELS.get(col, {"name": col, "description": "", "group": "Other"})
+            findings.append({
+                "name": meta["name"],
+                "description": meta["description"],
+                "group": meta["group"],
+                "percentage": pct,
+            })
+
+        findings.sort(key=lambda f: f["percentage"], reverse=True)
+        return findings
 
 
 def fit_health_index(
