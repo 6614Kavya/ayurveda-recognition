@@ -18,6 +18,7 @@ from app.module3_compound_leaves.predictor import (
 
 from app.core.database import get_species_metadata
 from app.module3_compound_leaves.species_metadata import get_species_display
+from app.core.database import get_db
 
 router = APIRouter(prefix="/predict", tags=["Leaf Router"])
 
@@ -64,17 +65,20 @@ async def predict_leaf(file: UploadFile = File(...)):
             )
 
         # COMPOUND LEAF
+        db = get_db()
         result = predict_species(image_bytes)
 
         display = get_species_display(result["species"])
 
+        plant_info = await db.compound_leaves.find_one({"label": result["species"]})
+        
         return PredictionResponse(
-            plant_name=display["plant_name"],
+            plant_name=result["species"],
             confidence=result["confidence"],
-            module="module3_compound_leaves",
-            sinhala_name=display["sinhala_name"],
-            uses=display["uses"],
-            diseases_treated=display["diseases_treated"],
+            module=plant_info.get("module", "") if plant_info else "module3_compound_leaves",
+            sinhala_name=plant_info.get("sinhala_name", "") if plant_info else "",
+            uses=plant_info.get("uses", "") if plant_info else "",
+            diseases_treated=plant_info.get("diseases_treated", []) if plant_info else []
         )
 
     except PredictionError as e:
